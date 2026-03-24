@@ -1,0 +1,30 @@
+{
+  "name": "@poker/server",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/server/src/index.js",
+  "types": "dist/server/src/index.d.ts",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/server/src/index.js",
+    "test": "vitest run --pool=threads"
+  },
+  "dependencies": {
+    "@poker/shared": "0.1.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "pg": "^8.13.3",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.1",
+    "@types/node": "^22.13.14",
+    "@types/pg": "^8.11.11",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.8"
+  }
+}

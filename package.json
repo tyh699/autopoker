@@ -1,0 +1,20 @@
+{
+  "name": "chinese-poker-room",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm.cmd run build -w @poker/shared && npm.cmd run build -w @poker/server && npm.cmd run build -w @poker/web",
+    "typecheck": "npm.cmd run build -w @poker/shared && npm.cmd run typecheck -w @poker/server && npm.cmd run typecheck -w @poker/web",
+    "test": "npm.cmd run build -w @poker/shared && npm.cmd run test -w @poker/server && npm.cmd run test -w @poker/web",
+    "dev:web": "npm.cmd run build -w @poker/shared && npm.cmd run dev -w @poker/web",
+    "dev:server": "npm.cmd run build -w @poker/shared && npm.cmd run dev -w @poker/server",
+    "start:server": "npm.cmd run build -w @poker/shared && npm.cmd run build -w @poker/server && npm.cmd run start -w @poker/server",
+    "share": "start-share.cmd"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2"
+  }
+}
