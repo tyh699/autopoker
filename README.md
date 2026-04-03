@@ -1,12 +1,20 @@
-# 中文多人联机德州扑克
+# 中文多人联机德州扑克（账号版）
 
 单仓多包项目，包含：
 
-- `@poker/shared`：共享类型、Socket 协议、中文文案工具
-- `@poker/server`：Node.js + Socket.IO 权威牌局服务
-- `@poker/web`：React + Vite 中文牌桌界面
+- `@poker/shared`：共享类型、Socket 协议、历史/排行榜类型
+- `@poker/server`：Node.js + Socket.IO 权威牌局服务（Supabase JWT 鉴权）
+- `@poker/web`：React + Vite 中文牌桌界面（Supabase 邮箱登录）
+- `@poker/desktop`：Tauri 桌面壳（复用 `@poker/web`）
 
-## 开发
+## 目标能力
+
+- 每个玩家必须注册/登录账号后才能进入房间
+- 实时牌局仍由 Socket.IO 驱动
+- PostgreSQL 保存牌局历史、用户统计、排行榜数据
+- 支持桌面客户端打包（Windows 优先）
+
+## 开发启动
 
 ```bash
 npm.cmd install
@@ -14,43 +22,124 @@ npm.cmd run dev:server
 npm.cmd run dev:web
 ```
 
+可先复制 `.env.example` 为 `.env` 再填入 Supabase 与数据库配置。
+
 前端默认跑在 `5173`，服务端默认跑在 `3001`。
 
-Windows 下一键启动：
+## 环境变量
+
+### 服务端（`@poker/server`）
+
+- `PORT`：默认 `3001`
+- `CLIENT_ORIGIN`：默认 `http://localhost:5173`
+- `DATABASE_URL`：PostgreSQL 连接串（建议 Supabase Postgres）
+- `AUTH_REQUIRED`：默认 `true`，设为 `false` 可关闭鉴权（仅本地调试）
+- `SUPABASE_URL`：例如 `https://xxx.supabase.co`
+- `SUPABASE_JWT_SECRET`：可选，若不填则走 Supabase JWKS 校验
+- `SUPABASE_JWT_AUDIENCE`：默认 `authenticated`
+- `WEB_DIST_PATH`：可选，手动指定前端构建目录
+
+### 前端（`@poker/web`）
+
+- `VITE_SERVER_URL`：默认同源或 `http://localhost:3001`
+- `VITE_SUPABASE_URL`：Supabase 项目 URL
+- `VITE_SUPABASE_ANON_KEY`：Supabase 匿名公钥
+
+## 数据库
+
+SQL 脚本位置：
+
+- `packages/server/db/schema.sql`
+
+新增关键表：
+
+- `app_users`：账号资料
+- `user_stats`：累计统计（手数、胜局、净筹码）
+- `hand_player_results`：每手每人结果（用于历史和排行榜）
+
+## 新增 HTTP API（需 Bearer Token）
+
+- `GET /api/me/history?limit=12`
+- `GET /api/leaderboard?limit=8`
+- `GET /api/rooms/:roomCode/hands?limit=8`
+
+## 桌面端（Tauri）
 
 ```bash
-start-dev.cmd
+npm.cmd run dev:desktop
+npm.cmd run build:desktop
 ```
 
-它会自动打开两个终端窗口，分别启动前端和后端开发服务。
+目录：
 
-## 单网址分享给别人
-
-推荐方案是让后端同时托管前端构建产物，然后用 Cloudflare Quick Tunnel 暴露 `3001` 端口。这样别人只需要打开一个网址。
-
-准备：
-
-1. 安装 `cloudflared`，或者把官方 `cloudflared.exe` 放到 `tools/cloudflared/`
-2. 保持你的电脑开机并联网
-3. 在项目根目录运行：
-
-```bash
-start-share.cmd
-```
-
-脚本会自动：
-
-- 构建前后端
-- 启动本地 Node 服务
-- 打开一个 Cloudflare 临时隧道窗口
-
-当 `Poker Tunnel` 窗口里出现 `https://xxxx.trycloudflare.com` 后，把这个网址发给别人即可。
+- `packages/desktop/src-tauri`
 
 说明：
 
-- 别人访问这个网址后，前端、接口和 Socket.IO 都走同一个域名
-- 这种方式适合测试、朋友局和临时分享
-- 关闭你的电脑、关闭服务窗口，或者关闭 tunnel 窗口后，公网网址会失效
+- 开发模式会先启动 `@poker/web`，再打开桌面窗口
+- 打包依赖 Rust 工具链（`rustup`）与平台编译环境
+
+Linux/WSL 打包前建议先装系统依赖（需 sudo）：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config \
+  libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+  librsvg2-dev patchelf
+```
+
+项目里提供了本地环境与检查脚本：
+
+```bash
+source tools/local-env.sh
+./tools/check-all.sh
+./tools/build-desktop.sh
+```
+
+桌面打包产物默认在：
+
+- `./.tools/target/release/bundle/`
+
+### Windows 打包（最终安装包）
+
+建议在 Windows 原生终端（PowerShell/CMD）执行：
+
+```bash
+npm.cmd install
+npm.cmd run build:desktop:win
+```
+
+产物通常在：
+
+- `packages\desktop\src-tauri\target\release\bundle\msi\`
+- `packages\desktop\src-tauri\target\release\bundle\nsis\`
+
+## 单网址分享给别人
+
+仍可用 `start-share.cmd`：
+
+- 服务端托管前端构建产物
+- Cloudflare Quick Tunnel 暴露 `3001`
+
+## Render 免费部署（公网后端）
+
+仓库已提供 `render.yaml`，可用 Blueprint 一键创建服务。
+
+1. 先把代码推到 GitHub（Render 需要拉取仓库）。
+2. 打开 [Render Dashboard](https://dashboard.render.com/)。
+3. 选择 `New` -> `Blueprint`，连接你的仓库并创建。
+4. 在 Render 服务里填环境变量：
+
+- `AUTH_REQUIRED=true`
+- `SUPABASE_JWT_AUDIENCE=authenticated`
+- `SUPABASE_URL=https://你的项目ref.supabase.co`
+- `SUPABASE_JWT_SECRET=`（可留空，走 JWKS）
+- `DATABASE_URL=你的 Supabase Postgres 连接串`（建议 `?sslmode=require`）
+- `CLIENT_ORIGIN=http://localhost:5173,http://127.0.0.1:5173,tauri://localhost,http://tauri.localhost,https://你的前端域名`
+
+5. 部署成功后，用 `https://你的-render-服务.onrender.com/health` 验证。
+
+桌面端联调时，把本地 `.env` 的 `VITE_SERVER_URL` 改为 Render 公网地址并重启前端/桌面进程。
 
 ## 构建与测试
 
@@ -61,23 +150,3 @@ npm.cmd run build -w @poker/server
 npm.cmd run build -w @poker/web
 npm.cmd run test -w @poker/server
 ```
-
-## 环境变量
-
-服务端可选：
-
-- `PORT`：默认 `3001`
-- `DATABASE_URL`：可选 PostgreSQL 连接串
-- `CLIENT_ORIGIN`：允许的前端来源，默认 `http://localhost:5173`
-
-前端可选：
-
-- `VITE_SERVER_URL`：默认 `http://localhost:3001`
-
-## 数据库
-
-PostgreSQL 建表脚本在：
-
-- `packages/server/db/schema.sql`
-
-如果不提供 `DATABASE_URL`，服务端仍然可以用内存房间正常跑多人联机，只是不写入持久化记录。

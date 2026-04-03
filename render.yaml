@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: autopoker-server
+    runtime: node
+    plan: free
+    rootDir: .
+    autoDeploy: true
+    buildCommand: npm install && npm run build -w @poker/shared && npm run build -w @poker/server
+    startCommand: npm run start -w @poker/server
+    healthCheckPath: /health
+    envVars:
+      - key: AUTH_REQUIRED
+        value: "true"
+      - key: SUPABASE_JWT_AUDIENCE
+        value: authenticated
+      - key: CLIENT_ORIGIN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
