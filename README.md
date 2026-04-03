@@ -31,7 +31,7 @@ npm.cmd run dev:web
 ### 服务端（`@poker/server`）
 
 - `PORT`：默认 `3001`
-- `CLIENT_ORIGIN`：默认 `http://localhost:5173`
+- `CLIENT_ORIGIN`：默认 `http://localhost:5173,http://127.0.0.1:5173`
 - `DATABASE_URL`：PostgreSQL 连接串（建议 Supabase Postgres）
 - `AUTH_REQUIRED`：默认 `true`，设为 `false` 可关闭鉴权（仅本地调试）
 - `SUPABASE_URL`：例如 `https://xxx.supabase.co`
@@ -44,6 +44,26 @@ npm.cmd run dev:web
 - `VITE_SERVER_URL`：默认同源或 `http://localhost:3001`
 - `VITE_SUPABASE_URL`：Supabase 项目 URL
 - `VITE_SUPABASE_ANON_KEY`：Supabase 匿名公钥
+
+## 密钥与隐私
+
+- 仓库应只保留 `.env.example` 模板，不要提交真实 `.env`。
+- `VITE_*` 变量会被打进前端产物，属于公开信息，不要放私钥。
+- 以下字段必须只放在服务器环境变量（如 Render）：
+  - `DATABASE_URL`
+  - `SUPABASE_JWT_SECRET`
+  - 任何 `service_role` 或私钥
+- 若密钥曾在聊天、截图或日志中暴露，建议立刻轮换（重置）并更新部署环境。
+
+## 提 PR 前检查
+
+```bash
+git status --ignored
+git ls-files | rg -n "\\.env|secret|key|password"
+git diff --cached | rg -n "DATABASE_URL|JWT_SECRET|service_role|password|SUPABASE"
+```
+
+如命中敏感值，先改为占位符并轮换真实密钥，再提交。
 
 ## 数据库
 

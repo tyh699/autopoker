@@ -3,6 +3,7 @@ dist
 coverage
 .env
 .env.*
+!.env.example
 *.log
 package-lock.json
 target
