@@ -33,11 +33,16 @@ import type {
 import type { Server, Socket } from "socket.io";
 import { createDeck, shuffleDeck } from "./cards.js";
 import { compareHands, evaluateBestHand } from "./hand-evaluator.js";
+import type { AuthenticatedUser } from "./auth.js";
 import { Persistence } from "./persistence.js";
 import { clamp, createId, generateRoomCode, nowIso } from "./utils.js";
 
-type AppSocket = Socket<ClientToServerEvents, ServerToClientEvents>;
-type AppServer = Server<ClientToServerEvents, ServerToClientEvents>;
+interface AuthSocketData {
+  authUser: AuthenticatedUser;
+}
+
+type AppSocket = Socket<ClientToServerEvents, ServerToClientEvents, Record<string, never>, AuthSocketData>;
+type AppServer = Server<ClientToServerEvents, ServerToClientEvents, Record<string, never>, AuthSocketData>;
 
 const NEXT_HAND_DELAY_MS = 2100;
 
@@ -48,10 +53,13 @@ interface PlayerHandState {
   actedThisStreet: boolean;
   committedThisStreet: number;
   totalCommitted: number;
+  chipsAtHandStart: number;
 }
 
 interface PlayerRecord {
   id: string;
+  userId: string;
+  email: string | null;
   nickname: string;
   socketId: string | null;
   reconnectToken: string;
@@ -172,9 +180,10 @@ export class PokerRoomManager {
   }
 
   private async createRoom(socket: AppSocket, payload: CreateRoomPayload): Promise<RoomView> {
+    const authUser = this.getAuthUser(socket);
     const roomCode = generateRoomCode(new Set(this.rooms.keys()));
     const config = this.validateRoomConfig(payload.config);
-    const player = this.createPlayer(this.validateNickname(payload.nickname), config.startingChips, socket.id, true);
+    const player = this.createPlayer(authUser, this.validateNickname(payload.nickname), config.startingChips, socket.id, true);
     player.seatIndex = Math.floor(config.maxPlayers / 2);
     const room: RoomRecord = {
       roomCode,
@@ -194,7 +203,8 @@ export class PokerRoomManager {
     };
     this.rooms.set(roomCode, room);
     socket.join(roomCode);
-    await this.persistence.saveRoomCreated(roomCode, player.id, config);
+    await this.persistence.saveUserProfile({ userId: player.userId, email: player.email, nickname: player.nickname });
+    await this.persistence.saveRoomCreated(roomCode, player.id, player.userId, config);
     await this.persistPlayer(room, player);
     this.pushAudit(room, player.nickname, `创建了房间 ${roomCode}`);
     this.broadcastState(room, room.hand ? "game:state" : "room:state");
@@ -202,28 +212,54 @@ export class PokerRoomManager {
   }
 
   private async joinRoom(socket: AppSocket, payload: JoinRoomPayload): Promise<RoomView> {
+    const authUser = this.getAuthUser(socket);
     const room = this.getRoom(payload.roomCode);
     const nickname = this.validateNickname(payload.nickname);
+    const existingByUser = [...room.players.values()].find((player) => player.userId === authUser.userId && !player.pendingKick);
+    if (existingByUser) {
+      if (existingByUser.nickname !== nickname) {
+        existingByUser.nickname = nickname;
+      }
+      existingByUser.email = authUser.email;
+      existingByUser.connected = true;
+      existingByUser.socketId = socket.id;
+      socket.join(room.roomCode);
+      room.message = `${existingByUser.nickname} 已重新加入房间。`;
+      await this.persistence.saveUserProfile({
+        userId: existingByUser.userId,
+        email: existingByUser.email,
+        nickname: existingByUser.nickname,
+      });
+      await this.persistPlayer(room, existingByUser);
+      this.broadcastState(room, room.hand ? "game:state" : "room:state");
+      return this.buildRoomView(room, existingByUser.id);
+    }
     if ([...room.players.values()].some((player) => player.nickname === nickname && !player.pendingKick)) {
       throw new Error("该昵称已被占用");
     }
-    const player = this.createPlayer(nickname, room.config.startingChips, socket.id, false);
+    const player = this.createPlayer(authUser, nickname, room.config.startingChips, socket.id, false);
     room.players.set(player.id, player);
     room.message = `${nickname} 加入了房间。`;
     socket.join(room.roomCode);
+    await this.persistence.saveUserProfile({ userId: player.userId, email: player.email, nickname: player.nickname });
     await this.persistPlayer(room, player);
     this.broadcastState(room, "room:state");
     return this.buildRoomView(room, player.id);
   }
 
   private async reconnectRoom(socket: AppSocket, payload: ReconnectRoomPayload): Promise<RoomView> {
+    const authUser = this.getAuthUser(socket);
     const room = this.getRoom(payload.roomCode);
     const player = [...room.players.values()].find((entry) => entry.reconnectToken === payload.reconnectToken);
     if (!player) {
       throw new Error("重连凭证无效");
     }
+    if (player.userId !== authUser.userId) {
+      throw new Error("该重连凭证不属于当前账号");
+    }
     player.connected = true;
     player.socketId = socket.id;
+    player.email = authUser.email;
     room.message = `${player.nickname} 已重新连接。`;
     socket.join(room.roomCode);
     this.broadcastState(room, room.hand ? "game:state" : "room:state");
@@ -288,6 +324,7 @@ export class PokerRoomManager {
               actedThisStreet: false,
               committedThisStreet: 0,
               totalCommitted: 0,
+              chipsAtHandStart: seated.chips,
             }
           : null;
     }
@@ -374,7 +411,9 @@ export class PokerRoomManager {
       roomCode: room.roomCode,
       handId: room.hand?.id ?? null,
       actorPlayerId: player.id,
+      actorUserId: player.userId,
       targetPlayerId: target.id,
+      targetUserId: target.userId,
       beforeValue,
       afterValue: nextValue,
     });
@@ -482,12 +521,13 @@ export class PokerRoomManager {
       id: createId("chat"),
       roomCode: room.roomCode,
       playerId: player.id,
+      userId: player.userId,
       nickname: player.nickname,
       text,
       createdAt: nowIso(),
     };
     room.chatMessages = [...room.chatMessages.slice(-29), message];
-    await this.persistence.saveChatMessage(message);
+    await this.persistence.saveChatMessage(message, player.userId);
     this.io.to(room.roomCode).emit("chat:message", message);
     this.broadcastState(room, room.hand ? "game:state" : "room:state");
     return this.buildRoomView(room, player.id);
@@ -586,6 +626,7 @@ export class PokerRoomManager {
       handId: hand.id,
       roomCode: room.roomCode,
       playerId: player.id,
+      userId: player.userId,
       nickname: player.nickname,
       street: hand.street,
       actionType,
@@ -813,6 +854,34 @@ export class PokerRoomManager {
       winners: hand.winners,
     });
     for (const participant of participants) {
+      if (!participant.hand) {
+        continue;
+      }
+      const winner = hand.winners.find((entry) => entry.playerId === participant.id);
+      const wonAmount = winner?.amount ?? 0;
+      const endChips = participant.pendingStackOverride ?? participant.chips;
+      const deltaChips = endChips - participant.hand.chipsAtHandStart;
+      await this.persistence.saveHandPlayerResult({
+        handId: hand.id,
+        roomCode: room.roomCode,
+        userId: participant.userId,
+        playerId: participant.id,
+        nickname: participant.nickname,
+        chipsAtHandStart: participant.hand.chipsAtHandStart,
+        endChips,
+        deltaChips,
+        wonAmount,
+        isWinner: wonAmount > 0,
+        winningHandName: winner?.handName ?? null,
+      });
+      await this.persistence.saveUserStatsDelta({
+        userId: participant.userId,
+        handsPlayedInc: 1,
+        handsWonInc: wonAmount > 0 ? 1 : 0,
+        netChipsInc: deltaChips,
+      });
+    }
+    for (const participant of participants) {
       participant.hand = null;
     }
     if (specialResult?.mode === "red_packet_bust") {
@@ -879,6 +948,7 @@ export class PokerRoomManager {
               actedThisStreet: false,
               committedThisStreet: 0,
               totalCommitted: 0,
+              chipsAtHandStart: seated.chips,
             }
           : null;
     }
@@ -953,6 +1023,7 @@ export class PokerRoomManager {
               actedThisStreet: false,
               committedThisStreet: 0,
               totalCommitted: 0,
+              chipsAtHandStart: seated.chips,
             }
           : null;
     }
@@ -1132,6 +1203,7 @@ export class PokerRoomManager {
       status: room.status,
       config: room.config,
       hostPlayerId: room.hostPlayerId,
+      viewerUserId: viewer.userId,
       viewerPlayerId: viewer.id,
       viewerReconnectToken: viewer.reconnectToken,
       viewerNickname: viewer.nickname,
@@ -1283,9 +1355,17 @@ export class PokerRoomManager {
     this.broadcastState(room, room.hand ? "game:state" : "game:result");
   }
 
-  private createPlayer(nickname: string, chips: number, socketId: string, isHost: boolean): PlayerRecord {
+  private createPlayer(
+    authUser: AuthenticatedUser,
+    nickname: string,
+    chips: number,
+    socketId: string,
+    isHost: boolean,
+  ): PlayerRecord {
     return {
       id: createId("player"),
+      userId: authUser.userId,
+      email: authUser.email,
       nickname,
       socketId,
       reconnectToken: randomUUID(),
@@ -1304,6 +1384,7 @@ export class PokerRoomManager {
     await this.persistence.savePlayerState({
       roomCode: room.roomCode,
       playerId: player.id,
+      userId: player.userId,
       nickname: player.nickname,
       seatIndex: player.seatIndex,
       stack: player.pendingStackOverride ?? player.chips,
@@ -1373,6 +1454,14 @@ export class PokerRoomManager {
 
   private getPlayerBySeat(room: RoomRecord, seatIndex: number): PlayerRecord | undefined {
     return [...room.players.values()].find((entry) => entry.seatIndex === seatIndex);
+  }
+
+  private getAuthUser(socket: AppSocket): AuthenticatedUser {
+    const authUser = socket.data.authUser;
+    if (!authUser?.userId) {
+      throw new Error("未登录或登录信息无效");
+    }
+    return authUser;
   }
 
   private findNextOccupiedSeat(

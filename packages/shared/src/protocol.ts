@@ -128,6 +128,7 @@ export interface ChatMessage {
   id: string;
   roomCode: string;
   playerId: string;
+  userId?: string;
   nickname: string;
   text: string;
   createdAt: string;
@@ -138,6 +139,7 @@ export interface RoomView {
   status: RoomStatus;
   config: RoomConfig;
   hostPlayerId: string;
+  viewerUserId: string;
   viewerPlayerId: string;
   viewerReconnectToken: string;
   viewerNickname: string;
@@ -215,6 +217,35 @@ export interface GameAnimationEvent {
     | "showdown";
   createdAt: string;
   payload: Record<string, unknown>;
+}
+
+export interface UserHandHistoryItem {
+  handId: string;
+  roomCode: string;
+  nickname: string;
+  startedAt: string;
+  finishedAt: string | null;
+  wonAmount: number;
+  deltaChips: number;
+  isWinner: boolean;
+  winningHandName: string | null;
+}
+
+export interface RoomHandHistoryItem {
+  handId: string;
+  roomCode: string;
+  street: GameStreet;
+  startedAt: string;
+  finishedAt: string | null;
+  winners: WinnerSummary[];
+}
+
+export interface LeaderboardItem {
+  userId: string;
+  nickname: string;
+  handsPlayed: number;
+  handsWon: number;
+  netChips: number;
 }
 
 export type SocketAck<T> =

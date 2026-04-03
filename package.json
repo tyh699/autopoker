@@ -11,7 +11,11 @@
     "test": "npm.cmd run build -w @poker/shared && npm.cmd run test -w @poker/server && npm.cmd run test -w @poker/web",
     "dev:web": "npm.cmd run build -w @poker/shared && npm.cmd run dev -w @poker/web",
     "dev:server": "npm.cmd run build -w @poker/shared && npm.cmd run dev -w @poker/server",
+    "dev:desktop": "npm.cmd run dev -w @poker/desktop",
     "start:server": "npm.cmd run build -w @poker/shared && npm.cmd run build -w @poker/server && npm.cmd run start -w @poker/server",
+    "build:desktop": "npm.cmd run build -w @poker/desktop",
+    "build:desktop:win": "npm.cmd run build:win -w @poker/desktop",
+    "build:desktop:linux": "npm.cmd run build:linux -w @poker/desktop",
     "share": "start-share.cmd"
   },
   "devDependencies": {

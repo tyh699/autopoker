@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@poker/shared": "0.1.0",
+    "@supabase/supabase-js": "^2.49.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "socket.io-client": "^4.8.1"

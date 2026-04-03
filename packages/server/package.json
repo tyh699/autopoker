@@ -14,7 +14,9 @@
   "dependencies": {
     "@poker/shared": "0.1.0",
     "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
     "express": "^4.21.2",
+    "jose": "^6.0.11",
     "pg": "^8.13.3",
     "socket.io": "^4.8.1"
   },

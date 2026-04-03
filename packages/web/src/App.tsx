@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type Dispatch, type SetStateAction } from "react";
 import { io, type Socket } from "socket.io-client";
+import type { Session } from "@supabase/supabase-js";
 import type {
   AdminAuditLog,
   Card,
@@ -8,15 +9,19 @@ import type {
   GameActionPayload,
   GameAnimationEvent,
   GameMode,
+  LeaderboardItem,
   RoomConfig,
+  RoomHandHistoryItem,
   RoomView,
   SeatView,
   ServerToClientEvents,
   SpecialGameResult,
   SocketAck,
+  UserHandHistoryItem,
   WinnerSummary,
 } from "@poker/shared";
 import { DISPLAY_RANK, GAME_MODE_LABEL, STREET_LABEL, SUIT_SYMBOL, formatCard } from "@poker/shared";
+import { hasSupabaseConfig, supabase } from "./auth";
 
 function resolveServerUrl(): string {
   if (import.meta.env.VITE_SERVER_URL) {
@@ -35,6 +40,7 @@ function resolveServerUrl(): string {
 const SERVER_URL = resolveServerUrl();
 const RECENT_KEY = "poker:last-session";
 const SETTLEMENT_OVERLAY_MS = 2000;
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 
 type AppSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
@@ -48,6 +54,17 @@ interface SettlementState {
   title: string;
   winners: WinnerSummary[];
   specialResult: SpecialGameResult | null;
+}
+
+function formatAuthError(nextError: unknown, fallback: string): string {
+  if (nextError instanceof Error) {
+    const message = nextError.message?.trim() || fallback;
+    if (/Failed to fetch|NetworkError/i.test(message)) {
+      return `无法连接 Supabase 认证服务（${SUPABASE_URL ?? "未配置 URL"}），请检查代理/防火墙或网络拦截后重试。`;
+    }
+    return message;
+  }
+  return fallback;
 }
 
 const defaultConfig: RoomConfig = {
@@ -224,10 +241,88 @@ function CardFace({ card, hidden = false, large = false }: { card?: Card; hidden
   );
 }
 
+function formatDelta(value: number): string {
+  return value > 0 ? `+${value}` : String(value);
+}
+
+async function fetchApi<T>(path: string, accessToken: string): Promise<T> {
+  const response = await fetch(`${SERVER_URL}${path}`, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(payload.error ?? `请求失败 (${response.status})`);
+  }
+  return (await response.json()) as T;
+}
+
+function AuthPanel(props: {
+  email: string;
+  setEmail: (value: string) => void;
+  password: string;
+  setPassword: (value: string) => void;
+  loading: boolean;
+  error: string;
+  onSignIn: () => void;
+  onSignUp: () => void;
+}) {
+  const { email, setEmail, password, setPassword, loading, error, onSignIn, onSignUp } = props;
+  return (
+    <div className="landing-shell">
+      <div className="landing-backdrop" />
+      <main className="auth-grid">
+        <section className="hero-panel">
+          <p className="eyebrow">账号登录</p>
+          <h1>先登录账号，再进入多人牌桌</h1>
+          <p className="hero-copy">第一版使用邮箱密码，登录后才能创建房间、加入房间和保存历史战绩。</p>
+          {!hasSupabaseConfig ? (
+            <div className="error-banner">
+              缺少 Supabase 前端配置，请设置 `VITE_SUPABASE_URL` 与 `VITE_SUPABASE_ANON_KEY`。
+            </div>
+          ) : null}
+          {error ? <div className="error-banner">{error}</div> : null}
+        </section>
+
+        <section className="card-panel auth-card">
+          <h2>邮箱登录</h2>
+          <label>
+            邮箱
+            <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" />
+          </label>
+          <label>
+            密码
+            <input
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="至少 6 位"
+            />
+          </label>
+          <div className="auth-actions">
+            <button className="accent-button" disabled={loading || !hasSupabaseConfig} onClick={onSignIn}>
+              {loading ? "处理中..." : "登录"}
+            </button>
+            <button className="ghost-button" disabled={loading || !hasSupabaseConfig} onClick={onSignUp}>
+              {loading ? "处理中..." : "注册"}
+            </button>
+          </div>
+        </section>
+      </main>
+    </div>
+  );
+}
+
 function LandingPage(props: {
   notice: string;
   error: string;
+  authEmail: string;
   recentSession: SessionSnapshot | null;
+  meHistory: UserHandHistoryItem[];
+  leaderboard: LeaderboardItem[];
+  roomHands: RoomHandHistoryItem[];
+  loadingData: boolean;
   createName: string;
   setCreateName: (value: string) => void;
   joinCode: string;
@@ -235,15 +330,22 @@ function LandingPage(props: {
   joinName: string;
   setJoinName: (value: string) => void;
   config: RoomConfig;
-  setConfig: React.Dispatch<React.SetStateAction<RoomConfig>>;
+  setConfig: Dispatch<SetStateAction<RoomConfig>>;
   onReconnect: () => void;
   onCreate: () => void;
   onJoin: () => void;
+  onRefreshData: () => void;
+  onSignOut: () => void;
 }) {
   const {
     notice,
     error,
+    authEmail,
     recentSession,
+    meHistory,
+    leaderboard,
+    roomHands,
+    loadingData,
     createName,
     setCreateName,
     joinCode,
@@ -255,6 +357,8 @@ function LandingPage(props: {
     onReconnect,
     onCreate,
     onJoin,
+    onRefreshData,
+    onSignOut,
   } = props;
 
   return (
@@ -270,6 +374,12 @@ function LandingPage(props: {
           <div className="status-bar">
             <span>{notice}</span>
             {error ? <strong>{error}</strong> : null}
+          </div>
+          <div className="session-chip">
+            <span>{authEmail}</span>
+            <button className="ghost-button" onClick={onSignOut}>
+              退出
+            </button>
           </div>
           {recentSession ? (
             <button className="accent-button" onClick={onReconnect}>
@@ -372,6 +482,54 @@ function LandingPage(props: {
           <button className="ghost-button" onClick={onJoin}>
             加入房间
           </button>
+          <button className="ghost-button" onClick={onRefreshData}>
+            {loadingData ? "刷新中..." : "刷新历史与排行"}
+          </button>
+        </section>
+
+        <section className="card-panel history-panel">
+          <h2>我的最近战绩</h2>
+          <div className="mini-list">
+            {meHistory.length ? (
+              meHistory.map((entry) => (
+                <div key={`${entry.handId}-${entry.startedAt}`} className="mini-row">
+                  <strong>{entry.roomCode}</strong>
+                  <span>{entry.winningHandName ?? "未摊牌"}</span>
+                  <b>{formatDelta(entry.deltaChips)}</b>
+                </div>
+              ))
+            ) : (
+              <div className="mini-empty">暂无历史数据</div>
+            )}
+          </div>
+          <h2>排行榜 Top 8</h2>
+          <div className="mini-list">
+            {leaderboard.length ? (
+              leaderboard.map((entry, index) => (
+                <div key={entry.userId} className="mini-row">
+                  <strong>#{index + 1}</strong>
+                  <span>{entry.nickname}</span>
+                  <b>{entry.netChips}</b>
+                </div>
+              ))
+            ) : (
+              <div className="mini-empty">暂无排行数据</div>
+            )}
+          </div>
+          <h2>当前房间最近手牌</h2>
+          <div className="mini-list">
+            {roomHands.length ? (
+              roomHands.map((entry) => (
+                <div key={entry.handId} className="mini-row">
+                  <strong>{STREET_LABEL[entry.street]}</strong>
+                  <span>{entry.winners.map((winner) => winner.nickname).join("、") || "无"}</span>
+                  <b>{entry.roomCode}</b>
+                </div>
+              ))
+            ) : (
+              <div className="mini-empty">输入房间号并刷新可查看</div>
+            )}
+          </div>
         </section>
       </main>
     </div>
@@ -382,11 +540,21 @@ export function App() {
   const socketRef = useRef<AppSocket | null>(null);
   const settlementTimerRef = useRef<number | null>(null);
 
+  const [session, setSession] = useState<Session | null>(null);
+  const [authBooting, setAuthBooting] = useState(true);
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
+
   const [room, setRoom] = useState<RoomView | null>(null);
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("连接中...");
+  const [notice, setNotice] = useState("请先登录");
   const [lastAnimation, setLastAnimation] = useState<GameAnimationEvent["kind"] | null>(null);
   const [recentSession, setRecentSession] = useState<SessionSnapshot | null>(null);
+  const [meHistory, setMeHistory] = useState<UserHandHistoryItem[]>([]);
+  const [leaderboard, setLeaderboard] = useState<LeaderboardItem[]>([]);
+  const [roomHands, setRoomHands] = useState<RoomHandHistoryItem[]>([]);
+  const [loadingData, setLoadingData] = useState(false);
   const [countdown, setCountdown] = useState(0);
   const [createName, setCreateName] = useState("房主");
   const [joinCode, setJoinCode] = useState("");
@@ -404,7 +572,73 @@ export function App() {
   const [resetNotice, setResetNotice] = useState("");
 
   useEffect(() => {
-    const socket = io(SERVER_URL, { autoConnect: true });
+    const recent = localStorage.getItem(RECENT_KEY);
+    if (recent) {
+      try {
+        setRecentSession(JSON.parse(recent) as SessionSnapshot);
+      } catch {
+        localStorage.removeItem(RECENT_KEY);
+      }
+    }
+
+    return () => {
+      if (settlementTimerRef.current) {
+        window.clearTimeout(settlementTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hasSupabaseConfig || !supabase) {
+      setAuthBooting(false);
+      setError("缺少 Supabase 配置，请设置 VITE_SUPABASE_URL 与 VITE_SUPABASE_ANON_KEY");
+      return;
+    }
+    let active = true;
+    supabase.auth
+      .getSession()
+      .then(({ data }) => {
+        if (!active) {
+          return;
+        }
+        setSession(data.session);
+      })
+      .catch((nextError) => {
+        if (!active) {
+          return;
+        }
+        setError(formatAuthError(nextError, "初始化登录会话失败"));
+      })
+      .finally(() => {
+        if (active) {
+          setAuthBooting(false);
+        }
+      });
+
+    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+    });
+
+    return () => {
+      active = false;
+      data.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!session?.access_token) {
+      socketRef.current?.disconnect();
+      socketRef.current = null;
+      setRoom(null);
+      setNotice("请先登录");
+      return;
+    }
+
+    const socket = io(SERVER_URL, {
+      autoConnect: true,
+      auth: { token: session.access_token },
+      transports: ["websocket", "polling"],
+    });
     socketRef.current = socket;
 
     const syncRoom = (nextRoom: RoomView) => {
@@ -420,6 +654,12 @@ export function App() {
 
     socket.on("connect", () => {
       setNotice("连接成功，可以创建或加入房间。");
+      setError("");
+    });
+    socket.on("connect_error", (event) => {
+      const detailCandidate = (event as unknown as { description?: unknown }).description;
+      const detail = typeof detailCandidate === "string" ? detailCandidate : "";
+      setError(detail ? `${event.message || "连接失败"}: ${detail}` : event.message || "连接失败，请重新登录");
     });
     socket.on("room:state", syncRoom);
     socket.on("game:state", syncRoom);
@@ -449,22 +689,10 @@ export function App() {
       }
     });
 
-    const recent = localStorage.getItem(RECENT_KEY);
-    if (recent) {
-      try {
-        setRecentSession(JSON.parse(recent) as SessionSnapshot);
-      } catch {
-        localStorage.removeItem(RECENT_KEY);
-      }
-    }
-
     return () => {
-      if (settlementTimerRef.current) {
-        window.clearTimeout(settlementTimerRef.current);
-      }
       socket.disconnect();
     };
-  }, []);
+  }, [session?.access_token]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -472,6 +700,40 @@ export function App() {
     }, 250);
     return () => window.clearInterval(timer);
   }, [room?.hand?.actionDeadlineAt]);
+
+  const refreshData = async () => {
+    if (!session?.access_token) {
+      return;
+    }
+    setLoadingData(true);
+    const roomCode = (room?.roomCode ?? joinCode).trim().toUpperCase();
+    try {
+      const [historyResponse, leaderboardResponse, roomHandsResponse] = await Promise.all([
+        fetchApi<{ items: UserHandHistoryItem[] }>("/api/me/history?limit=12", session.access_token),
+        fetchApi<{ items: LeaderboardItem[] }>("/api/leaderboard?limit=8", session.access_token),
+        roomCode
+          ? fetchApi<{ items: RoomHandHistoryItem[] }>(`/api/rooms/${roomCode}/hands?limit=8`, session.access_token)
+          : Promise.resolve({ items: [] }),
+      ]);
+      setMeHistory(historyResponse.items);
+      setLeaderboard(leaderboardResponse.items);
+      setRoomHands(roomHandsResponse.items);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "获取历史数据失败");
+    } finally {
+      setLoadingData(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!session?.access_token) {
+      setMeHistory([]);
+      setLeaderboard([]);
+      setRoomHands([]);
+      return;
+    }
+    void refreshData();
+  }, [session?.access_token, room?.roomCode]);
 
   const emitAck = async <T,>(event: keyof ClientToServerEvents, payload: unknown): Promise<T> => {
     const socket = socketRef.current;
@@ -500,6 +762,60 @@ export function App() {
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "请求失败");
     }
+  };
+
+  const handleSignIn = async () => {
+    if (!supabase) {
+      return;
+    }
+    setAuthLoading(true);
+    try {
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email: authEmail.trim(),
+        password: authPassword,
+      });
+      if (signInError) {
+        throw signInError;
+      }
+      setError("");
+    } catch (nextError) {
+      setError(formatAuthError(nextError, "登录失败"));
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleSignUp = async () => {
+    if (!supabase) {
+      return;
+    }
+    setAuthLoading(true);
+    try {
+      const { error: signUpError } = await supabase.auth.signUp({
+        email: authEmail.trim(),
+        password: authPassword,
+      });
+      if (signUpError) {
+        throw signUpError;
+      }
+      setNotice("注册成功，请检查邮箱确认链接后登录。");
+      setError("");
+    } catch (nextError) {
+      setError(formatAuthError(nextError, "注册失败"));
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    if (!supabase) {
+      return;
+    }
+    await supabase.auth.signOut();
+    setRoom(null);
+    setRecentSession(null);
+    localStorage.removeItem(RECENT_KEY);
+    setNotice("已退出登录");
   };
 
   const viewerSeat = room?.seats.find((seat) => seat?.playerId === room.viewerPlayerId) ?? null;
@@ -547,12 +863,46 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [room?.specialResult]);
 
+  if (authBooting) {
+    return (
+      <div className="landing-shell">
+        <div className="landing-backdrop" />
+        <main className="auth-grid">
+          <section className="hero-panel">
+            <p className="eyebrow">正在初始化</p>
+            <h1>正在恢复登录会话...</h1>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
+  if (!session) {
+    return (
+      <AuthPanel
+        email={authEmail}
+        setEmail={setAuthEmail}
+        password={authPassword}
+        setPassword={setAuthPassword}
+        loading={authLoading}
+        error={error}
+        onSignIn={() => void handleSignIn()}
+        onSignUp={() => void handleSignUp()}
+      />
+    );
+  }
+
   if (!room) {
     return (
       <LandingPage
         notice={notice}
         error={error}
+        authEmail={session.user.email ?? session.user.id}
         recentSession={recentSession}
+        meHistory={meHistory}
+        leaderboard={leaderboard}
+        roomHands={roomHands}
+        loadingData={loadingData}
         createName={createName}
         setCreateName={setCreateName}
         joinCode={joinCode}
@@ -580,6 +930,12 @@ export function App() {
             setRoom(nextRoom);
           })
         }
+        onRefreshData={() => {
+          void refreshData();
+        }}
+        onSignOut={() => {
+          void handleSignOut();
+        }}
       />
     );
   }
@@ -615,6 +971,9 @@ export function App() {
           <div className="status-pill">盲注 {room.config.smallBlind} / {room.config.bigBlind}</div>
           <div className="status-pill">{room.hand ? STREET_LABEL[room.hand.street] : "等待开局"}</div>
           <div className="status-pill">{formatRoomStatus(room.status)}</div>
+          <button className="ghost-button" onClick={() => void handleSignOut()}>
+            退出账号
+          </button>
         </div>
       </header>
 
@@ -1051,7 +1410,7 @@ function ChatBarrage({ messages }: { messages: ChatMessage[] }) {
               "--track-top": `${CHAT_TRACKS[index % CHAT_TRACKS.length]}%`,
               "--duration": `${13 + (index % 4)}s`,
               "--delay": `${index * 0.2}s`,
-            } as React.CSSProperties
+            } as CSSProperties
           }
         >
           <strong>{message.nickname}</strong>
