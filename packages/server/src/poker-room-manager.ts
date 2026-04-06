@@ -318,8 +318,8 @@ export class PokerRoomManager {
     return this.buildRoomView(room, player.id);
     /*
     const participants = this.getSeatedPlayers(room).filter((entry) => entry.chips > 0 && !entry.pendingKick);
-    if (participants.length < 4) {
-      throw new Error("排位赛至少需要四名入座玩家且带有筹码");
+    if (participants.length < 2) {
+      throw new Error("至少需要两名入座玩家且带有筹码");
     }
     const dealerSeat =
       this.findNextOccupiedSeat(room, room.dealerSeatCursor, (entry) => entry.chips > 0 && !entry.pendingKick) ??
@@ -914,7 +914,7 @@ export class PokerRoomManager {
       return;
     }
     const participants = this.getSeatedPlayers(room).filter((entry) => entry.chips > 0 && !entry.pendingKick);
-    if (participants.length < 4) {
+    if (participants.length < 2) {
       return;
     }
     room.nextHandTimer = setTimeout(() => {
@@ -928,7 +928,7 @@ export class PokerRoomManager {
       return;
     }
     const participants = this.getSeatedPlayers(room).filter((entry) => entry.chips > 0 && !entry.pendingKick);
-    if (participants.length < 4) {
+    if (participants.length < 2) {
       return;
     }
     this.clearNextHandTimer(room);
@@ -1199,10 +1199,10 @@ export class PokerRoomManager {
     room.specialResult = null;
     room.status = "waiting";
     const readyPlayers = this.getSeatedPlayers(room).filter((entry) => entry.chips > 0 && !entry.pendingKick);
-    if (readyPlayers.length >= 4) {
+    if (readyPlayers.length >= 2) {
       await this.beginHand(room);
     } else {
-      room.message = "已重置筹码到1000。当前不足4人，等待更多玩家后再开局。";
+      room.message = "已重置筹码到1000。当前不足2人，等待更多玩家后再开局。";
       this.broadcastState(room, "room:state");
     }
     return this.buildRoomView(room, player.id);
