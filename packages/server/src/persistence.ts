@@ -24,6 +24,13 @@ export class Persistence {
     await this.pool?.end();
   }
 
+  private requirePool(): Pool {
+    if (!this.pool) {
+      throw new Error("DATABASE_URL 未配置，无法进行持久化写入");
+    }
+    return this.pool;
+  }
+
   private async safeQuery(query: string, values: unknown[]): Promise<void> {
     if (!this.pool) {
       return;
@@ -372,8 +379,12 @@ export class Persistence {
     bankruptCount: number;
     rankings: ChipRankingEntry[];
   }): Promise<void> {
+    const pool = this.requirePool();
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
     for (const entry of params.rankings) {
-      await this.safeQuery(
+      await client.query(
         `INSERT INTO room_round_results (
            room_code,
            round_id,
@@ -425,7 +436,7 @@ export class Persistence {
         ],
       );
 
-      await this.safeQuery(
+      await client.query(
         `INSERT INTO room_leaderboard_stats (
            room_code,
            user_id,
@@ -453,6 +464,14 @@ export class Persistence {
           entry.totalPoints,
         ],
       );
+    }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      console.error("saveRankedRoundResult failed:", error);
+      throw error;
+    } finally {
+      client.release();
     }
   }
 
@@ -491,7 +510,8 @@ export class Persistence {
     createdByUserId: string;
     note: string;
   }): Promise<void> {
-    await this.safeQuery(
+    const pool = this.requirePool();
+    await pool.query(
       `INSERT INTO room_settlement_snapshots (snapshot_id, room_code, created_by_user_id, note)
        VALUES ($1, $2, $3, $4)`,
       [params.snapshotId, params.roomCode, params.createdByUserId, params.note],
@@ -509,7 +529,8 @@ export class Persistence {
     totalPoints: number;
     details: Array<{ roundId: string; settledAt: string; points: number; rank: number; chips: number }>;
   }): Promise<void> {
-    await this.safeQuery(
+    const pool = this.requirePool();
+    await pool.query(
       `INSERT INTO room_settlement_entries (
          snapshot_id,
          room_code,

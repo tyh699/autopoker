@@ -194,6 +194,7 @@ export interface RoomView {
   seats: Array<SeatView | null>;
   hand: HandSnapshot | null;
   specialResult: SpecialGameResult | null;
+  latestSettlementSnapshot: RoomSettlementSnapshot | null;
   auditLogs: AdminAuditLog[];
   chatMessages: ChatMessage[];
 }

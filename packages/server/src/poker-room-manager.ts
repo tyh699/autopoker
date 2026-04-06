@@ -105,6 +105,7 @@ interface RoomRecord {
   auditLogs: AdminAuditLog[];
   chatMessages: ChatMessage[];
   specialResult: SpecialGameResult | null;
+  latestSettlementSnapshot: RoomSettlementSnapshot | null;
   dealerSeatCursor: number;
   timer: NodeJS.Timeout | null;
   nextHandTimer: NodeJS.Timeout | null;
@@ -210,6 +211,7 @@ export class PokerRoomManager {
       auditLogs: [],
       chatMessages: [],
       specialResult: null,
+      latestSettlementSnapshot: null,
       dealerSeatCursor: -1,
       timer: null,
       nextHandTimer: null,
@@ -365,6 +367,7 @@ export class PokerRoomManager {
       lastAggressiveAction: "新一手牌开始",
     };
     room.specialResult = null;
+    room.latestSettlementSnapshot = null;
 
     this.postForcedBet(room, smallBlindSeat, room.config.smallBlind);
     this.postForcedBet(room, bigBlindSeat, room.config.bigBlind);
@@ -851,6 +854,7 @@ export class PokerRoomManager {
     hand.actionDeadlineAt = null;
     this.clearTimer(room);
     room.specialResult = null;
+    room.latestSettlementSnapshot = null;
     const participants = this.getParticipants(room);
     await this.persistence.saveHandResult({
       handId: hand.id,
@@ -979,6 +983,7 @@ export class PokerRoomManager {
       lastAggressiveAction: "新一手牌开始",
     };
     room.specialResult = null;
+    room.latestSettlementSnapshot = null;
     this.postForcedBet(room, smallBlindSeat, room.config.smallBlind);
     this.postForcedBet(room, bigBlindSeat, room.config.bigBlind);
     room.hand.currentBet = room.config.bigBlind;
@@ -1054,6 +1059,7 @@ export class PokerRoomManager {
       lastAggressiveAction: "排位赛新一手开始",
     };
     room.specialResult = null;
+    room.latestSettlementSnapshot = null;
 
     this.postForcedBet(room, smallBlindSeat, room.config.smallBlind);
     this.postForcedBet(room, bigBlindSeat, room.config.bigBlind);
@@ -1197,6 +1203,7 @@ export class PokerRoomManager {
     }
     await this.resetAllPlayersToStartingChips(room);
     room.specialResult = null;
+    room.latestSettlementSnapshot = null;
     room.status = "waiting";
     const readyPlayers = this.getSeatedPlayers(room).filter((entry) => entry.chips > 0 && !entry.pendingKick);
     if (readyPlayers.length >= 2) {
@@ -1239,7 +1246,7 @@ export class PokerRoomManager {
     }
     const snapshots = await this.persistence.listRoomSettlementSnapshots(room.roomCode, 1);
     room.message = "结算结果已保存，可在结算记录中查看。";
-    return (
+    room.latestSettlementSnapshot = (
       snapshots[0] ?? {
         snapshotId,
         roomCode: room.roomCode,
@@ -1249,6 +1256,8 @@ export class PokerRoomManager {
         entries: [],
       }
     );
+    this.broadcastState(room, "room:state");
+    return room.latestSettlementSnapshot;
   }
 
   private getAvailableActions(room: RoomRecord, player: PlayerRecord): AvailableAction[] {
@@ -1346,6 +1355,7 @@ export class PokerRoomManager {
       seats: Array.from({ length: room.config.maxPlayers }, (_, seatIndex) => this.buildSeatView(room, seatIndex, viewerId)),
       hand: this.buildHandSnapshot(room, viewerId),
       specialResult: room.specialResult,
+      latestSettlementSnapshot: room.latestSettlementSnapshot,
       auditLogs: room.auditLogs,
       chatMessages: room.chatMessages,
     };

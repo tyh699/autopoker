@@ -577,6 +577,7 @@ export function App() {
   const [showChatOverlay, setShowChatOverlay] = useState(true);
   const [showChatComposer, setShowChatComposer] = useState(false);
   const [settlement, setSettlement] = useState<SettlementState | null>(null);
+  const [finalSnapshot, setFinalSnapshot] = useState<RoomSettlementSnapshot | null>(null);
   const [roleNotice, setRoleNotice] = useState("");
   const [resetNotice, setResetNotice] = useState("");
 
@@ -655,6 +656,9 @@ export function App() {
       setNotice(nextRoom.message);
       if (!nextRoom.specialResult || nextRoom.hand) {
         setSettlement(null);
+      }
+      if (nextRoom.latestSettlementSnapshot) {
+        setFinalSnapshot(nextRoom.latestSettlementSnapshot);
       }
       const snapshot = {
         roomCode: nextRoom.roomCode,
@@ -1379,12 +1383,14 @@ export function App() {
           }}
           onSettleResult={() => {
             void handle(async () => {
-              await emitAck("admin:settle_result", { roomCode: room.roomCode });
+              const snapshot = await emitAck<RoomSettlementSnapshot>("admin:settle_result", { roomCode: room.roomCode });
+              setFinalSnapshot(snapshot);
               await refreshData();
             });
           }}
         />
       ) : null}
+      {finalSnapshot ? <SettlementResultModal snapshot={finalSnapshot} onClose={() => setFinalSnapshot(null)} /> : null}
     </div>
   );
 }
@@ -1496,6 +1502,33 @@ function SettlementOverlay(props: {
             ) : null}
           </div>
         ) : null}
+      </div>
+    </div>
+  );
+}
+
+function SettlementResultModal(props: { snapshot: RoomSettlementSnapshot; onClose: () => void }) {
+  const { snapshot, onClose } = props;
+  return (
+    <div className="settlement-overlay">
+      <div className="settlement-panel is-victory">
+        <p className="eyebrow">当日结算</p>
+        <h2>房间总积分</h2>
+        <div className="settlement-banner">{new Date(snapshot.createdAt).toLocaleString()}</div>
+        <div className="ranking-list">
+          {snapshot.entries.map((entry, index) => (
+            <div key={`${snapshot.snapshotId}-${entry.userId}`} className={`ranking-row ${index === 0 ? "is-highlight" : ""}`}>
+              <span>第 {index + 1} 名</span>
+              <strong>{entry.nickname}</strong>
+              <b>{entry.totalPoints > 0 ? `+${entry.totalPoints.toFixed(1)}` : entry.totalPoints.toFixed(1)}</b>
+            </div>
+          ))}
+        </div>
+        <div className="admin-actions">
+          <button className="accent-button" onClick={onClose}>
+            关闭
+          </button>
+        </div>
       </div>
     </div>
   );
