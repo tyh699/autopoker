@@ -21,6 +21,7 @@ import type {
   PotState,
   ReconnectRoomPayload,
   RoomConfig,
+  RoomLeaderboardItem,
   RoomSettlementSnapshot,
   RoomStatus,
   RoomView,
@@ -105,11 +106,24 @@ interface RoomRecord {
   auditLogs: AdminAuditLog[];
   chatMessages: ChatMessage[];
   specialResult: SpecialGameResult | null;
+  roomLeaderboard: Map<string, FallbackLeaderboardRecord>;
   latestSettlementSnapshot: RoomSettlementSnapshot | null;
   dealerSeatCursor: number;
   timer: NodeJS.Timeout | null;
   nextHandTimer: NodeJS.Timeout | null;
   pausedRemainingMs: number | null;
+}
+
+interface FallbackLeaderboardRecord {
+  roomCode: string;
+  userId: string;
+  nickname: string;
+  roundsPlayed: number;
+  roundsWon: number;
+  bankruptCount: number;
+  totalPoints: number;
+  updatedAt: string;
+  details: Array<{ roundId: string; settledAt: string; points: number; rank: number; chips: number }>;
 }
 
 export class PokerRoomManager {
@@ -211,6 +225,7 @@ export class PokerRoomManager {
       auditLogs: [],
       chatMessages: [],
       specialResult: null,
+      roomLeaderboard: new Map(),
       latestSettlementSnapshot: null,
       dealerSeatCursor: -1,
       timer: null,
@@ -1152,6 +1167,8 @@ export class PokerRoomManager {
     room.specialResult = specialResult;
     room.message = `${specialResult.reason}，请房主选择继续下一大局或结算结果。`;
 
+    this.updateFallbackLeaderboard(room, specialResult);
+
     if (specialResult.isScored) {
       try {
         await this.persistence.saveRankedRoundResult({
@@ -1264,24 +1281,18 @@ export class PokerRoomManager {
       );
     } catch (error) {
       console.error("settleResult persistence failed:", error);
-      const fallbackEntries =
-        room.specialResult?.rankings.map((entry) => ({
+      const fallbackEntries = this.buildFallbackLeaderboard(room).map((entry) => {
+        const record = room.roomLeaderboard.get(entry.userId);
+        return {
           userId: entry.userId,
           nickname: entry.nickname,
           totalPoints: entry.totalPoints,
-          roundsPlayed: 1,
-          roundsWon: entry.rank === 1 ? 1 : 0,
-          bankruptCount: entry.chips === 0 ? 1 : 0,
-          details: [
-            {
-              roundId: room.specialResult?.roundId ?? createId("round"),
-              settledAt: room.specialResult?.settledAt ?? nowIso(),
-              points: entry.totalPoints,
-              rank: entry.rank,
-              chips: entry.chips,
-            },
-          ],
-        })) ?? [];
+          roundsPlayed: entry.roundsPlayed,
+          roundsWon: entry.roundsWon,
+          bankruptCount: entry.bankruptCount,
+          details: record?.details ?? [],
+        };
+      });
       room.message = "结算结果已生成（数据库异常，本次仅临时展示，未写入持久化）。";
       room.latestSettlementSnapshot = {
         snapshotId,
@@ -1391,10 +1402,76 @@ export class PokerRoomManager {
       seats: Array.from({ length: room.config.maxPlayers }, (_, seatIndex) => this.buildSeatView(room, seatIndex, viewerId)),
       hand: this.buildHandSnapshot(room, viewerId),
       specialResult: room.specialResult,
+      roomLeaderboard: this.buildFallbackLeaderboard(room),
       latestSettlementSnapshot: room.latestSettlementSnapshot,
       auditLogs: room.auditLogs,
       chatMessages: room.chatMessages,
     };
+  }
+
+  private updateFallbackLeaderboard(room: RoomRecord, result: SpecialGameResult): void {
+    for (const entry of result.rankings) {
+      const existing = room.roomLeaderboard.get(entry.userId);
+      const next: FallbackLeaderboardRecord = existing
+        ? { ...existing }
+        : {
+            roomCode: room.roomCode,
+            userId: entry.userId,
+            nickname: entry.nickname,
+            roundsPlayed: 0,
+            roundsWon: 0,
+            bankruptCount: 0,
+            totalPoints: 0,
+            updatedAt: result.settledAt,
+            details: [],
+          };
+      next.nickname = entry.nickname;
+      if (result.isScored) {
+        next.roundsPlayed += 1;
+        if (entry.rank === 1) {
+          next.roundsWon += 1;
+        }
+        if (entry.chips === 0) {
+          next.bankruptCount += 1;
+        }
+        next.totalPoints = Math.round((next.totalPoints + entry.totalPoints) * 10) / 10;
+      }
+      next.updatedAt = result.settledAt;
+      next.details = [
+        ...next.details,
+        {
+          roundId: result.roundId,
+          settledAt: result.settledAt,
+          points: entry.totalPoints,
+          rank: entry.rank,
+          chips: entry.chips,
+        },
+      ];
+      room.roomLeaderboard.set(entry.userId, next);
+    }
+  }
+
+  private buildFallbackLeaderboard(room: RoomRecord): RoomLeaderboardItem[] {
+    return [...room.roomLeaderboard.values()]
+      .sort((left, right) => {
+        if (right.totalPoints !== left.totalPoints) {
+          return right.totalPoints - left.totalPoints;
+        }
+        if (right.roundsWon !== left.roundsWon) {
+          return right.roundsWon - left.roundsWon;
+        }
+        return right.roundsPlayed - left.roundsPlayed;
+      })
+      .map((entry) => ({
+        roomCode: entry.roomCode,
+        userId: entry.userId,
+        nickname: entry.nickname,
+        roundsPlayed: entry.roundsPlayed,
+        roundsWon: entry.roundsWon,
+        bankruptCount: entry.bankruptCount,
+        totalPoints: entry.totalPoints,
+        updatedAt: entry.updatedAt,
+      }));
   }
 
   private buildSeatView(room: RoomRecord, seatIndex: number, viewerId: string): SeatView | null {

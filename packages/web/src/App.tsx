@@ -654,6 +654,9 @@ export function App() {
     const syncRoom = (nextRoom: RoomView) => {
       setRoom(nextRoom);
       setNotice(nextRoom.message);
+      if (nextRoom.roomLeaderboard.length) {
+        setLeaderboard(nextRoom.roomLeaderboard);
+      }
       if (!nextRoom.specialResult || nextRoom.hand) {
         setSettlement(null);
       }
