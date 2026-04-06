@@ -1153,15 +1153,20 @@ export class PokerRoomManager {
     room.message = `${specialResult.reason}，请房主选择继续下一大局或结算结果。`;
 
     if (specialResult.isScored) {
-      await this.persistence.saveRankedRoundResult({
-        roomCode: room.roomCode,
-        roundId: specialResult.roundId,
-        triggerType: specialResult.trigger,
-        settledAt: specialResult.settledAt,
-        waterUpCount: specialResult.waterUpCount,
-        bankruptCount: specialResult.bankruptCount,
-        rankings: specialResult.rankings,
-      });
+      try {
+        await this.persistence.saveRankedRoundResult({
+          roomCode: room.roomCode,
+          roundId: specialResult.roundId,
+          triggerType: specialResult.trigger,
+          settledAt: specialResult.settledAt,
+          waterUpCount: specialResult.waterUpCount,
+          bankruptCount: specialResult.bankruptCount,
+          rankings: specialResult.rankings,
+        });
+      } catch (error) {
+        console.error("saveRankedRoundResult failed:", error);
+        room.message = `${specialResult.reason}（数据库连接异常，当前仅本局展示，排行榜暂未落库）`;
+      }
     }
     for (const participant of this.getParticipants(room)) {
       await this.persistPlayer(room, participant);
@@ -1223,39 +1228,70 @@ export class PokerRoomManager {
     this.assertHost(room, player);
     const snapshotId = createId("snapshot");
     const note = (payload.note ?? "").trim().slice(0, 120);
-    await this.persistence.createRoomSettlementSnapshot({
-      snapshotId,
-      roomCode: room.roomCode,
-      createdByUserId: player.userId,
-      note,
-    });
-    const leaderboard = await this.persistence.listRoomLeaderboard(room.roomCode, 200);
-    for (const entry of leaderboard) {
-      const details = await this.persistence.listRoomRoundDetails(room.roomCode, entry.userId);
-      await this.persistence.saveRoomSettlementEntry({
+    try {
+      await this.persistence.createRoomSettlementSnapshot({
         snapshotId,
         roomCode: room.roomCode,
-        userId: entry.userId,
-        nickname: entry.nickname,
-        roundsPlayed: entry.roundsPlayed,
-        roundsWon: entry.roundsWon,
-        bankruptCount: entry.bankruptCount,
-        totalPoints: entry.totalPoints,
-        details,
+        note,
+        createdByUserId: player.userId,
       });
-    }
-    const snapshots = await this.persistence.listRoomSettlementSnapshots(room.roomCode, 1);
-    room.message = "结算结果已保存，可在结算记录中查看。";
-    room.latestSettlementSnapshot = (
-      snapshots[0] ?? {
+      const leaderboard = await this.persistence.listRoomLeaderboard(room.roomCode, 200);
+      for (const entry of leaderboard) {
+        const details = await this.persistence.listRoomRoundDetails(room.roomCode, entry.userId);
+        await this.persistence.saveRoomSettlementEntry({
+          snapshotId,
+          roomCode: room.roomCode,
+          userId: entry.userId,
+          nickname: entry.nickname,
+          roundsPlayed: entry.roundsPlayed,
+          roundsWon: entry.roundsWon,
+          bankruptCount: entry.bankruptCount,
+          totalPoints: entry.totalPoints,
+          details,
+        });
+      }
+      const snapshots = await this.persistence.listRoomSettlementSnapshots(room.roomCode, 1);
+      room.message = "结算结果已保存，可在结算记录中查看。";
+      room.latestSettlementSnapshot = (
+        snapshots[0] ?? {
+          snapshotId,
+          roomCode: room.roomCode,
+          createdByUserId: player.userId,
+          createdAt: nowIso(),
+          note,
+          entries: [],
+        }
+      );
+    } catch (error) {
+      console.error("settleResult persistence failed:", error);
+      const fallbackEntries =
+        room.specialResult?.rankings.map((entry) => ({
+          userId: entry.userId,
+          nickname: entry.nickname,
+          totalPoints: entry.totalPoints,
+          roundsPlayed: 1,
+          roundsWon: entry.rank === 1 ? 1 : 0,
+          bankruptCount: entry.chips === 0 ? 1 : 0,
+          details: [
+            {
+              roundId: room.specialResult?.roundId ?? createId("round"),
+              settledAt: room.specialResult?.settledAt ?? nowIso(),
+              points: entry.totalPoints,
+              rank: entry.rank,
+              chips: entry.chips,
+            },
+          ],
+        })) ?? [];
+      room.message = "结算结果已生成（数据库异常，本次仅临时展示，未写入持久化）。";
+      room.latestSettlementSnapshot = {
         snapshotId,
         roomCode: room.roomCode,
         createdByUserId: player.userId,
         createdAt: nowIso(),
         note,
-        entries: [],
-      }
-    );
+        entries: fallbackEntries,
+      };
+    }
     this.broadcastState(room, "room:state");
     return room.latestSettlementSnapshot;
   }

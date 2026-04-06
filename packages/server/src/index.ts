@@ -1,4 +1,7 @@
+import dns from "node:dns";
 import { createAppServer } from "./server.js";
+
+dns.setDefaultResultOrder("ipv4first");
 
 const { server, config } = createAppServer();
 
