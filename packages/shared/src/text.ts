@@ -40,8 +40,7 @@ export const DISPLAY_RANK: Record<Rank, string> = {
 };
 
 export const GAME_MODE_LABEL: Record<GameMode, string> = {
-  classic: "经典局",
-  red_packet_bust: "淘汰红包局",
+  ranked: "排位赛",
 };
 
 export function formatCard(card: { rank: string; suit: Suit }): string {

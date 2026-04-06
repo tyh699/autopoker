@@ -121,33 +121,36 @@ describe("poker-room-manager internals", () => {
     expect(pots).toEqual([{ amount: 200, eligiblePlayerIds: ["a", "b"] }]);
   });
 
-  it("builds red-packet rankings when a player busts", () => {
+  it("builds ranked settlement when a player busts", () => {
     const manager = createManager() as any;
     const room = {
       config: {
         maxPlayers: 6,
-        startingChips: 2000,
+        startingChips: 1000,
         smallBlind: 10,
         bigBlind: 20,
         actionSeconds: 20,
         allowMidHandJoin: true,
-        gameMode: "red_packet_bust",
+        gameMode: "ranked",
       },
       players: new Map([
-        ["a", { id: "a", nickname: "甲", seatIndex: 0, chips: 4100, pendingKick: false }],
-        ["b", { id: "b", nickname: "乙", seatIndex: 1, chips: 2600, pendingKick: false }],
-        ["c", { id: "c", nickname: "丙", seatIndex: 2, chips: 1800, pendingKick: false }],
-        ["d", { id: "d", nickname: "丁", seatIndex: 3, chips: 900, pendingKick: false }],
-        ["e", { id: "e", nickname: "戊", seatIndex: 4, chips: 0, pendingKick: false }],
-        ["f", { id: "f", nickname: "己", seatIndex: 5, chips: 600, pendingKick: false }],
+        ["a", { id: "a", userId: "u1", nickname: "甲", seatIndex: 0, chips: 2200, pendingKick: false }],
+        ["b", { id: "b", userId: "u2", nickname: "乙", seatIndex: 1, chips: 1400, pendingKick: false }],
+        ["c", { id: "c", userId: "u3", nickname: "丙", seatIndex: 2, chips: 900, pendingKick: false }],
+        ["d", { id: "d", userId: "u4", nickname: "丁", seatIndex: 3, chips: 800, pendingKick: false }],
+        ["e", { id: "e", userId: "u5", nickname: "戊", seatIndex: 4, chips: 700, pendingKick: false }],
+        ["f", { id: "f", userId: "u6", nickname: "己", seatIndex: 5, chips: 0, pendingKick: false }],
       ]),
     };
 
-    const result = manager.buildSpecialGameResult(room);
+    const result = manager.buildSpecialGameResult(room, "bankrupt");
 
-    expect(result?.mode).toBe("red_packet_bust");
-    expect(result?.redPacketNickname).toBe("丁");
-    expect(result?.rankings.map((entry: { nickname: string }) => entry.nickname)).toEqual(["甲", "乙", "丙", "丁", "己", "戊"]);
-    expect(result?.rankings.find((entry: { nickname: string }) => entry.nickname === "丁")?.shouldSendRedPacket).toBe(true);
+    expect(result?.mode).toBe("ranked");
+    expect(result?.trigger).toBe("bankrupt");
+    expect(result?.isScored).toBe(true);
+    expect(result?.bankruptCount).toBe(1);
+    expect(result?.rankings[0]?.nickname).toBe("甲");
+    expect(result?.rankings[0]?.championBonus).toBe(8);
+    expect(result?.rankings[5]?.bankruptPenalty).toBe(-8);
   });
 });

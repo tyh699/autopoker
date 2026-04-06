@@ -22,7 +22,7 @@ export interface Card {
 export type RoomStatus = "waiting" | "running" | "paused" | "ended";
 export type GameStreet = "preflop" | "flop" | "turn" | "river" | "showdown";
 export type PlayerActionType = "check" | "call" | "raise" | "fold" | "all_in";
-export type GameMode = "classic" | "red_packet_bust";
+export type GameMode = "ranked";
 
 export interface RoomConfig {
   maxPlayers: number;
@@ -55,19 +55,65 @@ export interface PotState {
 
 export interface ChipRankingEntry {
   playerId: string;
+  userId: string;
   nickname: string;
   chips: number;
   rank: number;
-  reverseRank: number;
-  shouldSendRedPacket: boolean;
+  isTied: boolean;
+  rankPoints: number;
+  chipPoints: number;
+  bankruptPenalty: number;
+  championBonus: number;
+  totalPoints: number;
 }
 
 export interface SpecialGameResult {
   mode: GameMode;
   reason: string;
-  redPacketPlayerId: string | null;
-  redPacketNickname: string | null;
+  trigger: "bankrupt" | "manual";
+  isScored: boolean;
+  roomCode: string;
+  roundId: string;
+  settledAt: string;
+  waterUpCount: number;
+  bankruptCount: number;
   rankings: ChipRankingEntry[];
+}
+
+export interface RoomLeaderboardItem {
+  roomCode: string;
+  userId: string;
+  nickname: string;
+  roundsPlayed: number;
+  roundsWon: number;
+  bankruptCount: number;
+  totalPoints: number;
+  updatedAt: string;
+}
+
+export interface RoomSettlementEntry {
+  userId: string;
+  nickname: string;
+  totalPoints: number;
+  roundsPlayed: number;
+  roundsWon: number;
+  bankruptCount: number;
+  details: Array<{
+    roundId: string;
+    settledAt: string;
+    points: number;
+    rank: number;
+    chips: number;
+  }>;
+}
+
+export interface RoomSettlementSnapshot {
+  snapshotId: string;
+  roomCode: string;
+  createdByUserId: string;
+  createdAt: string;
+  note: string;
+  entries: RoomSettlementEntry[];
 }
 
 export interface WinnerSummary {
@@ -298,6 +344,18 @@ export interface ClientToServerEvents {
   "admin:end_hand": (
     payload: AdminRoomPayload,
     callback: (ack: SocketAck<RoomView>) => void,
+  ) => void;
+  "admin:end_round": (
+    payload: AdminRoomPayload,
+    callback: (ack: SocketAck<RoomView>) => void,
+  ) => void;
+  "admin:next_round": (
+    payload: AdminRoomPayload,
+    callback: (ack: SocketAck<RoomView>) => void,
+  ) => void;
+  "admin:settle_result": (
+    payload: AdminRoomPayload & { note?: string },
+    callback: (ack: SocketAck<RoomSettlementSnapshot>) => void,
   ) => void;
   "admin:kick": (
     payload: AdminKickPayload,

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import cors from "cors";
 import express from "express";
 import { Server } from "socket.io";
-import type { ClientToServerEvents, ServerToClientEvents } from "@poker/shared";
+import type { ClientToServerEvents, RoomSettlementSnapshot, ServerToClientEvents } from "@poker/shared";
 import { AuthService, type AuthenticatedUser } from "./auth.js";
 import { loadConfig } from "./config.js";
 import { Persistence } from "./persistence.js";
@@ -93,9 +93,40 @@ export function createAppServer() {
 
   app.get("/api/leaderboard", requireApiAuth, async (request, response: express.Response<unknown, AppLocals>) => {
     const limit = normalizeLimit(request.query.limit, 20);
-    const items = await persistence.listLeaderboard(limit);
+    const roomCode = typeof request.query.roomCode === "string" ? request.query.roomCode.trim().toUpperCase() : "";
+    const items = roomCode ? await persistence.listRoomLeaderboard(roomCode, limit) : await persistence.listLeaderboard(limit);
     response.json({ items });
   });
+
+  app.get(
+    "/api/rooms/:roomCode/leaderboard",
+    requireApiAuth,
+    async (request, response: express.Response<unknown, AppLocals>) => {
+      const roomCode = String(request.params.roomCode ?? "").trim().toUpperCase();
+      if (!roomCode) {
+        response.status(400).json({ error: "缺少房间号" });
+        return;
+      }
+      const limit = normalizeLimit(request.query.limit, 20);
+      const items = await persistence.listRoomLeaderboard(roomCode, limit);
+      response.json({ items });
+    },
+  );
+
+  app.get(
+    "/api/rooms/:roomCode/settlements",
+    requireApiAuth,
+    async (request, response: express.Response<{ items: RoomSettlementSnapshot[] } | { error: string }, AppLocals>) => {
+      const roomCode = String(request.params.roomCode ?? "").trim().toUpperCase();
+      if (!roomCode) {
+        response.status(400).json({ error: "缺少房间号" });
+        return;
+      }
+      const limit = normalizeLimit(request.query.limit, 10);
+      const items = await persistence.listRoomSettlementSnapshots(roomCode, limit);
+      response.json({ items });
+    },
+  );
 
   app.get(
     "/api/rooms/:roomCode/hands",

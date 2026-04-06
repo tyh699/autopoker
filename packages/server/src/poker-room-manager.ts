@@ -21,6 +21,7 @@ import type {
   PotState,
   ReconnectRoomPayload,
   RoomConfig,
+  RoomSettlementSnapshot,
   RoomStatus,
   RoomView,
   SeatTakePayload,
@@ -36,6 +37,7 @@ import { compareHands, evaluateBestHand } from "./hand-evaluator.js";
 import type { AuthenticatedUser } from "./auth.js";
 import { Persistence } from "./persistence.js";
 import { clamp, createId, generateRoomCode, nowIso } from "./utils.js";
+import { calculateRankedRound } from "./ranked-scoring.js";
 
 interface AuthSocketData {
   authUser: AuthenticatedUser;
@@ -157,6 +159,18 @@ export class PokerRoomManager {
     socket.on("admin:end_hand", async (payload: AdminRoomPayload, callback: (ack: SocketAck<RoomView>) => void) => {
       callback(await this.withAck(() => this.endHand(socket, payload)));
     });
+    socket.on("admin:end_round", async (payload: AdminRoomPayload, callback: (ack: SocketAck<RoomView>) => void) => {
+      callback(await this.withAck(() => this.endRound(socket, payload)));
+    });
+    socket.on("admin:next_round", async (payload: AdminRoomPayload, callback: (ack: SocketAck<RoomView>) => void) => {
+      callback(await this.withAck(() => this.nextRound(socket, payload)));
+    });
+    socket.on(
+      "admin:settle_result",
+      async (payload: AdminRoomPayload & { note?: string }, callback: (ack: SocketAck<RoomSettlementSnapshot>) => void) => {
+        callback(await this.withAck(() => this.settleResult(socket, payload)));
+      },
+    );
     socket.on("admin:kick", async (payload: AdminKickPayload, callback: (ack: SocketAck<RoomView>) => void) => {
       callback(await this.withAck(() => this.kickPlayer(socket, payload)));
     });
@@ -292,8 +306,11 @@ export class PokerRoomManager {
 
   private async startGame(socket: AppSocket, payload: AdminRoomPayload): Promise<RoomView> {
     const { room, player } = this.getRoomAndPlayer(socket.id, payload.roomCode);
-    this.assertAdmin(player);
+    this.assertHost(room, player);
     this.clearNextHandTimer(room);
+    if (room.specialResult) {
+      throw new Error("本大局已结算，请点击“继续下一大局”重置筹码后开始");
+    }
     if (room.hand) {
       throw new Error("当前已有手牌在进行中");
     }
@@ -301,8 +318,8 @@ export class PokerRoomManager {
     return this.buildRoomView(room, player.id);
     /*
     const participants = this.getSeatedPlayers(room).filter((entry) => entry.chips > 0 && !entry.pendingKick);
-    if (participants.length < 2) {
-      throw new Error("至少需要两名入座玩家且带有筹码");
+    if (participants.length < 4) {
+      throw new Error("排位赛至少需要四名入座玩家且带有筹码");
     }
     const dealerSeat =
       this.findNextOccupiedSeat(room, room.dealerSeatCursor, (entry) => entry.chips > 0 && !entry.pendingKick) ??
@@ -833,18 +850,7 @@ export class PokerRoomManager {
     hand.actionSeatIndex = null;
     hand.actionDeadlineAt = null;
     this.clearTimer(room);
-    const specialResult = this.buildSpecialGameResult(room);
-    room.specialResult = specialResult;
-    if (specialResult?.mode === "red_packet_bust") {
-      room.message = specialResult.redPacketNickname
-        ? `红包局结束，${specialResult.redPacketNickname} 请发红包，所有人筹码已重置。`
-        : "红包局结束，所有人筹码已重置。";
-    }
-    if (specialResult?.mode === "red_packet_bust") {
-      room.message = specialResult.redPacketNickname
-        ? `红包局结束：${specialResult.redPacketNickname} 需要发红包，所有玩家筹码已恢复为初始值。`
-        : "红包局结束，所有玩家筹码已恢复为初始值。";
-    }
+    room.specialResult = null;
     const participants = this.getParticipants(room);
     await this.persistence.saveHandResult({
       handId: hand.id,
@@ -884,8 +890,9 @@ export class PokerRoomManager {
     for (const participant of participants) {
       participant.hand = null;
     }
-    if (specialResult?.mode === "red_packet_bust") {
-      await this.resetAllPlayersToStartingChips(room);
+    const busted = this.getSeatedPlayers(room).some((entry) => entry.chips === 0 && !entry.pendingKick);
+    if (busted) {
+      await this.settleRound(room, "bankrupt");
       room.status = "ended";
     } else {
       for (const participant of participants) {
@@ -896,7 +903,7 @@ export class PokerRoomManager {
     this.broadcastState(room, "game:result");
     this.removeKickedPlayers(room);
     room.hand = null;
-    if (!specialResult) {
+    if (!busted) {
       this.scheduleAutoNextHand(room);
     }
   }
@@ -907,7 +914,7 @@ export class PokerRoomManager {
       return;
     }
     const participants = this.getSeatedPlayers(room).filter((entry) => entry.chips > 0 && !entry.pendingKick);
-    if (participants.length < 2) {
+    if (participants.length < 4) {
       return;
     }
     room.nextHandTimer = setTimeout(() => {
@@ -921,7 +928,7 @@ export class PokerRoomManager {
       return;
     }
     const participants = this.getSeatedPlayers(room).filter((entry) => entry.chips > 0 && !entry.pendingKick);
-    if (participants.length < 2) {
+    if (participants.length < 4) {
       return;
     }
     this.clearNextHandTimer(room);
@@ -1044,7 +1051,7 @@ export class PokerRoomManager {
       minRaiseTo: room.config.bigBlind * 2,
       winners: [],
       sidePots: [],
-      lastAggressiveAction: "新一小局开始",
+      lastAggressiveAction: "排位赛新一手开始",
     };
     room.specialResult = null;
 
@@ -1059,7 +1066,7 @@ export class PokerRoomManager {
 
     const smallBlindPlayer = this.getPlayerBySeat(room, smallBlindSeat);
     const bigBlindPlayer = this.getPlayerBySeat(room, bigBlindSeat);
-    room.message = `新一小局开始：${smallBlindPlayer?.nickname ?? "小盲"} 是小盲，${bigBlindPlayer?.nickname ?? "大盲"} 是大盲。`;
+    room.message = `排位赛手牌开始：${smallBlindPlayer?.nickname ?? "小盲"} 是小盲，${bigBlindPlayer?.nickname ?? "大盲"} 是大盲。`;
 
     await this.persistence.saveHandStarted({
       handId: room.hand.id,
@@ -1073,38 +1080,55 @@ export class PokerRoomManager {
     this.broadcastState(room, "game:state");
   }
 
-  private buildSpecialGameResult(room: RoomRecord): SpecialGameResult | null {
-    if (room.config.gameMode !== "red_packet_bust") {
-      return null;
-    }
+  private buildSpecialGameResult(room: RoomRecord, trigger: "bankrupt" | "manual"): SpecialGameResult {
     const rankedPlayers = this.getSeatedPlayers(room).filter((entry) => !entry.pendingKick);
-    if (!rankedPlayers.some((entry) => entry.chips === 0)) {
-      return null;
-    }
-
-    const ordered = [...rankedPlayers].sort((left, right) => {
-      if (right.chips !== left.chips) {
-        return right.chips - left.chips;
-      }
-      return (left.seatIndex ?? 0) - (right.seatIndex ?? 0);
-    });
-    const reverseTarget = Math.max(1, Math.floor(ordered.length / 2));
-    const targetIndex = Math.max(0, ordered.length - reverseTarget);
-    const redPacketPlayer = ordered[targetIndex] ?? null;
-    const rankings: ChipRankingEntry[] = ordered.map((player, index) => ({
-      playerId: player.id,
-      nickname: player.nickname,
-      chips: player.chips,
-      rank: index + 1,
-      reverseRank: ordered.length - index,
-      shouldSendRedPacket: player.id === redPacketPlayer?.id,
-    }));
+    const waterUpCount = rankedPlayers.filter((entry) => entry.chips > 1000).length;
+    const bankruptCount = rankedPlayers.filter((entry) => entry.chips === 0).length;
+    const canScore = rankedPlayers.length >= 4 && rankedPlayers.length <= 7;
+    const rankings = canScore
+      ? calculateRankedRound(
+          rankedPlayers.map((entry) => ({
+            playerId: entry.id,
+            userId: entry.userId,
+            nickname: entry.nickname,
+            chips: entry.chips,
+          })),
+        ).rankings
+      : [...rankedPlayers]
+          .sort((left, right) => {
+            if (right.chips !== left.chips) {
+              return right.chips - left.chips;
+            }
+            return left.nickname.localeCompare(right.nickname);
+          })
+          .map((entry, index) => ({
+            playerId: entry.id,
+            userId: entry.userId,
+            nickname: entry.nickname,
+            chips: entry.chips,
+            rank: index + 1,
+            isTied: false,
+            rankPoints: 0,
+            chipPoints: 0,
+            bankruptPenalty: 0,
+            championBonus: 0,
+            totalPoints: 0,
+          }));
 
     return {
-      mode: "red_packet_bust",
-      reason: "有玩家筹码归零，本大局结束",
-      redPacketPlayerId: redPacketPlayer?.id ?? null,
-      redPacketNickname: redPacketPlayer?.nickname ?? null,
+      mode: "ranked",
+      trigger,
+      isScored: canScore,
+      roomCode: room.roomCode,
+      roundId: createId("round"),
+      settledAt: nowIso(),
+      reason: canScore
+        ? trigger === "bankrupt"
+          ? "有人破产，本大局结算完成"
+          : "房主手动结束大局，结算完成"
+        : "当前人数少于4人，本大局仅重置筹码不计分",
+      waterUpCount,
+      bankruptCount,
       rankings,
     };
   }
@@ -1115,6 +1139,116 @@ export class PokerRoomManager {
       player.pendingStackOverride = null;
       await this.persistPlayer(room, player);
     }
+  }
+
+  private async settleRound(room: RoomRecord, trigger: "bankrupt" | "manual"): Promise<void> {
+    const specialResult = this.buildSpecialGameResult(room, trigger);
+    room.specialResult = specialResult;
+    room.message = `${specialResult.reason}，请房主选择继续下一大局或结算结果。`;
+
+    if (specialResult.isScored) {
+      await this.persistence.saveRankedRoundResult({
+        roomCode: room.roomCode,
+        roundId: specialResult.roundId,
+        triggerType: specialResult.trigger,
+        settledAt: specialResult.settledAt,
+        waterUpCount: specialResult.waterUpCount,
+        bankruptCount: specialResult.bankruptCount,
+        rankings: specialResult.rankings,
+      });
+    }
+    for (const participant of this.getParticipants(room)) {
+      await this.persistPlayer(room, participant);
+    }
+  }
+
+  private async endRound(socket: AppSocket, payload: AdminRoomPayload): Promise<RoomView> {
+    const { room, player } = this.getRoomAndPlayer(socket.id, payload.roomCode);
+    this.assertHost(room, player);
+
+    if (room.hand) {
+      for (const participant of this.getParticipants(room)) {
+        if (!participant.hand) {
+          continue;
+        }
+        participant.chips += participant.hand.totalCommitted;
+        participant.hand = null;
+        if (participant.pendingStackOverride !== null) {
+          participant.chips = participant.pendingStackOverride;
+          participant.pendingStackOverride = null;
+        }
+      }
+      room.hand = null;
+      this.clearTimer(room);
+    }
+
+    await this.settleRound(room, "manual");
+    room.status = "ended";
+    this.clearNextHandTimer(room);
+    this.broadcastState(room, "game:result");
+    return this.buildRoomView(room, player.id);
+  }
+
+  private async nextRound(socket: AppSocket, payload: AdminRoomPayload): Promise<RoomView> {
+    const { room, player } = this.getRoomAndPlayer(socket.id, payload.roomCode);
+    this.assertHost(room, player);
+    if (room.hand) {
+      throw new Error("当前仍有手牌在进行中");
+    }
+    await this.resetAllPlayersToStartingChips(room);
+    room.specialResult = null;
+    room.status = "waiting";
+    const readyPlayers = this.getSeatedPlayers(room).filter((entry) => entry.chips > 0 && !entry.pendingKick);
+    if (readyPlayers.length >= 4) {
+      await this.beginHand(room);
+    } else {
+      room.message = "已重置筹码到1000。当前不足4人，等待更多玩家后再开局。";
+      this.broadcastState(room, "room:state");
+    }
+    return this.buildRoomView(room, player.id);
+  }
+
+  private async settleResult(
+    socket: AppSocket,
+    payload: AdminRoomPayload & { note?: string },
+  ): Promise<RoomSettlementSnapshot> {
+    const { room, player } = this.getRoomAndPlayer(socket.id, payload.roomCode);
+    this.assertHost(room, player);
+    const snapshotId = createId("snapshot");
+    const note = (payload.note ?? "").trim().slice(0, 120);
+    await this.persistence.createRoomSettlementSnapshot({
+      snapshotId,
+      roomCode: room.roomCode,
+      createdByUserId: player.userId,
+      note,
+    });
+    const leaderboard = await this.persistence.listRoomLeaderboard(room.roomCode, 200);
+    for (const entry of leaderboard) {
+      const details = await this.persistence.listRoomRoundDetails(room.roomCode, entry.userId);
+      await this.persistence.saveRoomSettlementEntry({
+        snapshotId,
+        roomCode: room.roomCode,
+        userId: entry.userId,
+        nickname: entry.nickname,
+        roundsPlayed: entry.roundsPlayed,
+        roundsWon: entry.roundsWon,
+        bankruptCount: entry.bankruptCount,
+        totalPoints: entry.totalPoints,
+        details,
+      });
+    }
+    const snapshots = await this.persistence.listRoomSettlementSnapshots(room.roomCode, 1);
+    room.message = "结算结果已保存，可在结算记录中查看。";
+    return (
+      snapshots[0] ?? {
+        snapshotId,
+        roomCode: room.roomCode,
+        createdByUserId: player.userId,
+        createdAt: nowIso(),
+        note,
+        entries: [],
+      }
+    );
   }
 
   private getAvailableActions(room: RoomRecord, player: PlayerRecord): AvailableAction[] {
@@ -1502,6 +1636,12 @@ export class PokerRoomManager {
     }
   }
 
+  private assertHost(room: RoomRecord, player: PlayerRecord): void {
+    if (room.hostPlayerId !== player.id) {
+      throw new Error("只有房主可以执行该操作");
+    }
+  }
+
   private validateNickname(value: string): string {
     const nickname = value.trim().slice(0, 12);
     if (!nickname) {
@@ -1512,13 +1652,13 @@ export class PokerRoomManager {
 
   private validateRoomConfig(config: RoomConfig): RoomConfig {
     const normalized: RoomConfig = {
-      maxPlayers: clamp(Math.floor(config.maxPlayers), 2, 10),
+      maxPlayers: clamp(Math.floor(config.maxPlayers), 4, 7),
       startingChips: clamp(Math.floor(config.startingChips), 100, 1000000),
       smallBlind: clamp(Math.floor(config.smallBlind), 1, 100000),
       bigBlind: clamp(Math.floor(config.bigBlind), 2, 200000),
       actionSeconds: clamp(Math.floor(config.actionSeconds), 5, 90),
       allowMidHandJoin: Boolean(config.allowMidHandJoin),
-      gameMode: config.gameMode === "red_packet_bust" ? "red_packet_bust" : "classic",
+      gameMode: "ranked",
     };
     if (normalized.bigBlind <= normalized.smallBlind) {
       normalized.bigBlind = normalized.smallBlind * 2;

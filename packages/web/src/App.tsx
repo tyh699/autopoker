@@ -8,8 +8,8 @@ import type {
   ClientToServerEvents,
   GameActionPayload,
   GameAnimationEvent,
-  GameMode,
-  LeaderboardItem,
+  RoomLeaderboardItem,
+  RoomSettlementSnapshot,
   RoomConfig,
   RoomHandHistoryItem,
   RoomView,
@@ -69,12 +69,12 @@ function formatAuthError(nextError: unknown, fallback: string): string {
 
 const defaultConfig: RoomConfig = {
   maxPlayers: 6,
-  startingChips: 2000,
+  startingChips: 1000,
   smallBlind: 10,
   bigBlind: 20,
   actionSeconds: 20,
   allowMidHandJoin: true,
-  gameMode: "classic",
+  gameMode: "ranked",
 };
 
 const CHAT_TRACKS = [16, 28, 40, 52];
@@ -320,7 +320,8 @@ function LandingPage(props: {
   authEmail: string;
   recentSession: SessionSnapshot | null;
   meHistory: UserHandHistoryItem[];
-  leaderboard: LeaderboardItem[];
+  leaderboard: RoomLeaderboardItem[];
+  settlementSnapshots: RoomSettlementSnapshot[];
   roomHands: RoomHandHistoryItem[];
   loadingData: boolean;
   createName: string;
@@ -344,6 +345,7 @@ function LandingPage(props: {
     recentSession,
     meHistory,
     leaderboard,
+    settlementSnapshots,
     roomHands,
     loadingData,
     createName,
@@ -369,7 +371,7 @@ function LandingPage(props: {
           <p className="eyebrow">中文联机德州扑克</p>
           <h1>像真正牌桌一样铺满整个屏幕，而不是像后台页面。</h1>
           <p className="hero-copy">
-            支持 2 到 10 人中文联机、私人房间、管理员筹码调整、断线重连和更明显的结算提示。
+            支持 4 到 7 人中文联机排位赛、私人房间、管理员筹码调整、断线重连和更明显的结算提示。
           </p>
           <div className="status-bar">
             <span>{notice}</span>
@@ -399,8 +401,8 @@ function LandingPage(props: {
               座位数
               <input
                 type="number"
-                min={2}
-                max={10}
+                min={4}
+                max={7}
                 value={config.maxPlayers}
                 onChange={(event) => setConfig((current) => ({ ...current, maxPlayers: Number(event.target.value) }))}
               />
@@ -443,15 +445,7 @@ function LandingPage(props: {
             </label>
             <label>
               玩法模式
-              <select
-                value={config.gameMode}
-                onChange={(event) =>
-                  setConfig((current) => ({ ...current, gameMode: event.target.value as GameMode }))
-                }
-              >
-                <option value="classic">{GAME_MODE_LABEL.classic}</option>
-                <option value="red_packet_bust">{GAME_MODE_LABEL.red_packet_bust}</option>
-              </select>
+              <input value={GAME_MODE_LABEL.ranked} disabled />
             </label>
             <label className="checkbox-field">
               <input
@@ -502,18 +496,32 @@ function LandingPage(props: {
               <div className="mini-empty">暂无历史数据</div>
             )}
           </div>
-          <h2>排行榜 Top 8</h2>
+          <h2>当前房间排行榜 Top 8</h2>
           <div className="mini-list">
             {leaderboard.length ? (
               leaderboard.map((entry, index) => (
                 <div key={entry.userId} className="mini-row">
                   <strong>#{index + 1}</strong>
                   <span>{entry.nickname}</span>
-                  <b>{entry.netChips}</b>
+                  <b>{entry.totalPoints.toFixed(1)}</b>
                 </div>
               ))
             ) : (
               <div className="mini-empty">暂无排行数据</div>
+            )}
+          </div>
+          <h2>结算记录</h2>
+          <div className="mini-list">
+            {settlementSnapshots.length ? (
+              settlementSnapshots.map((entry) => (
+                <div key={entry.snapshotId} className="mini-row">
+                  <strong>{new Date(entry.createdAt).toLocaleString()}</strong>
+                  <span>{entry.note || "房主结算"}</span>
+                  <b>{entry.entries.length} 人</b>
+                </div>
+              ))
+            ) : (
+              <div className="mini-empty">暂无结算记录</div>
             )}
           </div>
           <h2>当前房间最近手牌</h2>
@@ -552,7 +560,8 @@ export function App() {
   const [lastAnimation, setLastAnimation] = useState<GameAnimationEvent["kind"] | null>(null);
   const [recentSession, setRecentSession] = useState<SessionSnapshot | null>(null);
   const [meHistory, setMeHistory] = useState<UserHandHistoryItem[]>([]);
-  const [leaderboard, setLeaderboard] = useState<LeaderboardItem[]>([]);
+  const [leaderboard, setLeaderboard] = useState<RoomLeaderboardItem[]>([]);
+  const [settlementSnapshots, setSettlementSnapshots] = useState<RoomSettlementSnapshot[]>([]);
   const [roomHands, setRoomHands] = useState<RoomHandHistoryItem[]>([]);
   const [loadingData, setLoadingData] = useState(false);
   const [countdown, setCountdown] = useState(0);
@@ -677,7 +686,9 @@ export function App() {
         if (settlementTimerRef.current) {
           window.clearTimeout(settlementTimerRef.current);
         }
-        settlementTimerRef.current = window.setTimeout(() => setSettlement(null), SETTLEMENT_OVERLAY_MS);
+        if (!nextRoom.specialResult) {
+          settlementTimerRef.current = window.setTimeout(() => setSettlement(null), SETTLEMENT_OVERLAY_MS);
+        }
       }
     });
     socket.on("system:error", (message) => setError(message));
@@ -708,16 +719,22 @@ export function App() {
     setLoadingData(true);
     const roomCode = (room?.roomCode ?? joinCode).trim().toUpperCase();
     try {
-      const [historyResponse, leaderboardResponse, roomHandsResponse] = await Promise.all([
+      const [historyResponse, leaderboardResponse, roomHandsResponse, settlementsResponse] = await Promise.all([
         fetchApi<{ items: UserHandHistoryItem[] }>("/api/me/history?limit=12", session.access_token),
-        fetchApi<{ items: LeaderboardItem[] }>("/api/leaderboard?limit=8", session.access_token),
+        roomCode
+          ? fetchApi<{ items: RoomLeaderboardItem[] }>(`/api/rooms/${roomCode}/leaderboard?limit=8`, session.access_token)
+          : Promise.resolve({ items: [] }),
         roomCode
           ? fetchApi<{ items: RoomHandHistoryItem[] }>(`/api/rooms/${roomCode}/hands?limit=8`, session.access_token)
-          : Promise.resolve({ items: [] }),
+          : Promise.resolve({ items: [] as RoomHandHistoryItem[] }),
+        roomCode
+          ? fetchApi<{ items: RoomSettlementSnapshot[] }>(`/api/rooms/${roomCode}/settlements?limit=5`, session.access_token)
+          : Promise.resolve({ items: [] as RoomSettlementSnapshot[] }),
       ]);
       setMeHistory(historyResponse.items);
       setLeaderboard(leaderboardResponse.items);
       setRoomHands(roomHandsResponse.items);
+      setSettlementSnapshots(settlementsResponse.items);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "获取历史数据失败");
     } finally {
@@ -730,10 +747,11 @@ export function App() {
       setMeHistory([]);
       setLeaderboard([]);
       setRoomHands([]);
+      setSettlementSnapshots([]);
       return;
     }
     void refreshData();
-  }, [session?.access_token, room?.roomCode]);
+  }, [session?.access_token, room?.roomCode, room?.specialResult?.roundId]);
 
   const emitAck = async <T,>(event: keyof ClientToServerEvents, payload: unknown): Promise<T> => {
     const socket = socketRef.current;
@@ -819,6 +837,7 @@ export function App() {
   };
 
   const viewerSeat = room?.seats.find((seat) => seat?.playerId === room.viewerPlayerId) ?? null;
+  const isHost = room ? room.hostPlayerId === room.viewerPlayerId : false;
   const isAdmin = room ? room.hostPlayerId === room.viewerPlayerId || Boolean(viewerSeat?.isAdmin) : false;
   const seatedPlayers = (room?.seats.filter((seat): seat is SeatView => Boolean(seat)) ?? []);
   const availableActions = room?.hand?.availableActions ?? [];
@@ -855,11 +874,11 @@ export function App() {
   }, [room?.hand?.handId, viewerSeat?.isSmallBlind, viewerSeat?.isBigBlind]);
 
   useEffect(() => {
-    if (room?.specialResult?.mode !== "red_packet_bust") {
+    if (!room?.specialResult) {
       return;
     }
-    setResetNotice("所有人筹码已恢复为初始值");
-    const timer = window.setTimeout(() => setResetNotice(""), 1000);
+    setResetNotice("本大局已结算，等待房主选择下一步");
+    const timer = window.setTimeout(() => setResetNotice(""), 1800);
     return () => window.clearTimeout(timer);
   }, [room?.specialResult]);
 
@@ -901,6 +920,7 @@ export function App() {
         recentSession={recentSession}
         meHistory={meHistory}
         leaderboard={leaderboard}
+        settlementSnapshots={settlementSnapshots}
         roomHands={roomHands}
         loadingData={loadingData}
         createName={createName}
@@ -1014,7 +1034,13 @@ export function App() {
             {!room.hand ? (
               <div className="room-waiting-panel">
                 <p className="eyebrow">房间准备阶段</p>
-                <h2>{room.viewerSeatIndex === null ? "先坐下，再开始牌局" : "等待更多玩家或直接开始"}</h2>
+                <h2>
+                  {room.specialResult
+                    ? "本大局已结算，等待房主选择"
+                    : room.viewerSeatIndex === null
+                      ? "先坐下，再开始牌局"
+                      : "等待更多玩家或直接开始"}
+                </h2>
                 <p>
                   房间号 <strong>{room.roomCode}</strong>
                   {room.viewerSeatIndex !== null ? `，你当前在 ${room.viewerSeatIndex + 1} 号位。` : "，你当前还没有入座。"}
@@ -1032,13 +1058,34 @@ export function App() {
                       坐到推荐座位
                     </button>
                   ) : null}
-                  {isAdmin ? (
+                  {isHost && !room.specialResult ? (
                     <button
                       className="ghost-button"
                       onClick={() => handle(() => emitAck("game:start", { roomCode: room.roomCode }))}
                     >
                       直接开始手牌
                     </button>
+                  ) : null}
+                  {isHost && room.specialResult ? (
+                    <>
+                      <button
+                        className="accent-button"
+                        onClick={() => handle(() => emitAck("admin:next_round", { roomCode: room.roomCode }))}
+                      >
+                        继续下一大局
+                      </button>
+                      <button
+                        className="ghost-button"
+                        onClick={() =>
+                          handle(async () => {
+                            await emitAck("admin:settle_result", { roomCode: room.roomCode });
+                            await refreshData();
+                          })
+                        }
+                      >
+                        结算结果
+                      </button>
+                    </>
                   ) : null}
                 </div>
               </div>
@@ -1173,6 +1220,30 @@ export function App() {
               </div>
             )}
           </div>
+          <div className="viewer-summary">
+            <div className="viewer-summary__header">
+              <div>
+                <p className="eyebrow">房间排行榜</p>
+                <h2>累计总分</h2>
+              </div>
+              <button className="ghost-button" onClick={() => void refreshData()}>
+                {loadingData ? "刷新中" : "刷新"}
+              </button>
+            </div>
+            <div className="mini-list">
+              {leaderboard.length ? (
+                leaderboard.map((entry, index) => (
+                  <div key={`${entry.userId}-room-rank`} className="mini-row">
+                    <strong>#{index + 1}</strong>
+                    <span>{entry.nickname}</span>
+                    <b>{entry.totalPoints.toFixed(1)}</b>
+                  </div>
+                ))
+              ) : (
+                <div className="mini-empty">暂无房间排行数据</div>
+              )}
+            </div>
+          </div>
         </section>
       </main>
 
@@ -1217,8 +1288,8 @@ export function App() {
                 <button className="ghost-button" onClick={() => handle(() => emitAck("admin:resume", { roomCode: room.roomCode }))}>
                   恢复牌局
                 </button>
-                <button className="ghost-button" onClick={() => handle(() => emitAck("admin:end_hand", { roomCode: room.roomCode }))}>
-                  结束当前手牌
+                <button className="ghost-button" onClick={() => handle(() => emitAck("admin:end_round", { roomCode: room.roomCode }))}>
+                  终止并结算大局
                 </button>
               </div>
             </section>
@@ -1295,7 +1366,22 @@ export function App() {
         </div>
       ) : null}
 
-      {settlement ? <SettlementOverlay settlement={settlement} viewerId={room.viewerPlayerId} /> : null}
+      {settlement ? (
+        <SettlementOverlay
+          settlement={settlement}
+          viewerId={room.viewerPlayerId}
+          isAdmin={isHost}
+          onNextRound={() => {
+            void handle(() => emitAck("admin:next_round", { roomCode: room.roomCode }));
+          }}
+          onSettleResult={() => {
+            void handle(async () => {
+              await emitAck("admin:settle_result", { roomCode: room.roomCode });
+              await refreshData();
+            });
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -1337,8 +1423,14 @@ function PlayerSeatCard(props: { seat: SeatView; isWinner: boolean; isViewer: bo
   );
 }
 
-function SettlementOverlay(props: { settlement: SettlementState; viewerId: string }) {
-  const { settlement, viewerId } = props;
+function SettlementOverlay(props: {
+  settlement: SettlementState;
+  viewerId: string;
+  isAdmin: boolean;
+  onNextRound: () => void;
+  onSettleResult: () => void;
+}) {
+  const { settlement, viewerId, isAdmin, onNextRound, onSettleResult } = props;
   const viewerWon = settlement.winners.some((winner) => winner.playerId === viewerId);
 
   return (
@@ -1372,23 +1464,33 @@ function SettlementOverlay(props: { settlement: SettlementState; viewerId: strin
         {settlement.specialResult ? (
           <div className="ranking-panel">
             <div className="ranking-panel__title">{settlement.specialResult.reason}</div>
-            {settlement.specialResult.redPacketNickname ? (
-              <div className="ranking-panel__notice">
-                请 <strong>{settlement.specialResult.redPacketNickname}</strong> 发红包
-              </div>
+            <div className="ranking-panel__notice">
+              水上人数 {settlement.specialResult.waterUpCount}，破产人数 {settlement.specialResult.bankruptCount}
+            </div>
+            {!settlement.specialResult.isScored ? (
+              <div className="ranking-panel__notice">当前人数不足 4 人，本次仅重置筹码，不计入排行榜。</div>
             ) : null}
             <div className="ranking-list">
               {settlement.specialResult.rankings.map((entry) => (
-                <div
-                  key={`${settlement.handId}-${entry.playerId}-rank`}
-                  className={`ranking-row ${entry.shouldSendRedPacket ? "is-highlight" : ""}`}
-                >
-                  <span>第 {entry.rank} 名</span>
+                <div key={`${settlement.handId}-${entry.playerId}-rank`} className={`ranking-row ${entry.rank === 1 ? "is-highlight" : ""}`}>
+                  <span>第 {entry.rank} 名{entry.isTied ? " (并列)" : ""}</span>
                   <strong>{entry.nickname}</strong>
-                  <b>{entry.chips}</b>
+                  <b>
+                    {entry.chips} / {entry.totalPoints > 0 ? `+${entry.totalPoints.toFixed(1)}` : entry.totalPoints.toFixed(1)}
+                  </b>
                 </div>
               ))}
             </div>
+            {isAdmin ? (
+              <div className="admin-actions">
+                <button className="accent-button" onClick={onNextRound}>
+                  继续下一大局
+                </button>
+                <button className="ghost-button" onClick={onSettleResult}>
+                  结算结果
+                </button>
+              </div>
+            ) : null}
           </div>
         ) : null}
       </div>

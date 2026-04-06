@@ -1,7 +1,10 @@
 import { Pool, type QueryResultRow } from "pg";
 import type {
+  ChipRankingEntry,
   ChatMessage,
   LeaderboardItem,
+  RoomLeaderboardItem,
+  RoomSettlementSnapshot,
   RoomConfig,
   RoomHandHistoryItem,
   UserHandHistoryItem,
@@ -358,5 +361,263 @@ export class Persistence {
       finishedAt: row.finishedAt,
       winners: Array.isArray(row.winners) ? row.winners : [],
     }));
+  }
+
+  async saveRankedRoundResult(params: {
+    roomCode: string;
+    roundId: string;
+    triggerType: "bankrupt" | "manual";
+    settledAt: string;
+    waterUpCount: number;
+    bankruptCount: number;
+    rankings: ChipRankingEntry[];
+  }): Promise<void> {
+    for (const entry of params.rankings) {
+      await this.safeQuery(
+        `INSERT INTO room_round_results (
+           room_code,
+           round_id,
+           trigger_type,
+           settled_at,
+           water_up_count,
+           bankrupt_count,
+           user_id,
+           player_id,
+           nickname,
+           chips,
+           rank,
+           is_tied,
+           rank_points,
+           chip_points,
+           bankrupt_penalty,
+           champion_bonus,
+           total_points
+         )
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+         ON CONFLICT (room_code, round_id, user_id) DO UPDATE
+         SET nickname = EXCLUDED.nickname,
+             chips = EXCLUDED.chips,
+             rank = EXCLUDED.rank,
+             is_tied = EXCLUDED.is_tied,
+             rank_points = EXCLUDED.rank_points,
+             chip_points = EXCLUDED.chip_points,
+             bankrupt_penalty = EXCLUDED.bankrupt_penalty,
+             champion_bonus = EXCLUDED.champion_bonus,
+             total_points = EXCLUDED.total_points`,
+        [
+          params.roomCode,
+          params.roundId,
+          params.triggerType,
+          params.settledAt,
+          params.waterUpCount,
+          params.bankruptCount,
+          entry.userId,
+          entry.playerId,
+          entry.nickname,
+          entry.chips,
+          entry.rank,
+          entry.isTied,
+          entry.rankPoints,
+          entry.chipPoints,
+          entry.bankruptPenalty,
+          entry.championBonus,
+          entry.totalPoints,
+        ],
+      );
+
+      await this.safeQuery(
+        `INSERT INTO room_leaderboard_stats (
+           room_code,
+           user_id,
+           nickname,
+           rounds_played,
+           rounds_won,
+           bankrupt_count,
+           total_points
+         )
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (room_code, user_id) DO UPDATE
+         SET nickname = EXCLUDED.nickname,
+             rounds_played = room_leaderboard_stats.rounds_played + EXCLUDED.rounds_played,
+             rounds_won = room_leaderboard_stats.rounds_won + EXCLUDED.rounds_won,
+             bankrupt_count = room_leaderboard_stats.bankrupt_count + EXCLUDED.bankrupt_count,
+             total_points = room_leaderboard_stats.total_points + EXCLUDED.total_points,
+             updated_at = NOW()`,
+        [
+          params.roomCode,
+          entry.userId,
+          entry.nickname,
+          1,
+          entry.rank === 1 ? 1 : 0,
+          entry.chips === 0 ? 1 : 0,
+          entry.totalPoints,
+        ],
+      );
+    }
+  }
+
+  async listRoomLeaderboard(roomCode: string, limit: number): Promise<RoomLeaderboardItem[]> {
+    const rows = await this.safeQueryRows<RoomLeaderboardItem>(
+      `SELECT
+         room_code AS "roomCode",
+         user_id AS "userId",
+         nickname AS "nickname",
+         rounds_played AS "roundsPlayed",
+         rounds_won AS "roundsWon",
+         bankrupt_count AS "bankruptCount",
+         total_points AS "totalPoints",
+         updated_at AS "updatedAt"
+       FROM room_leaderboard_stats
+       WHERE room_code = $1
+       ORDER BY total_points DESC, rounds_won DESC, rounds_played DESC
+       LIMIT $2`,
+      [roomCode, limit],
+    );
+    return rows.map((row) => ({
+      ...row,
+      roundsPlayed: Number(row.roundsPlayed),
+      roundsWon: Number(row.roundsWon),
+      bankruptCount: Number(row.bankruptCount),
+      totalPoints: Number(row.totalPoints),
+    }));
+  }
+
+  async createRoomSettlementSnapshot(params: {
+    snapshotId: string;
+    roomCode: string;
+    createdByUserId: string;
+    note: string;
+  }): Promise<void> {
+    await this.safeQuery(
+      `INSERT INTO room_settlement_snapshots (snapshot_id, room_code, created_by_user_id, note)
+       VALUES ($1, $2, $3, $4)`,
+      [params.snapshotId, params.roomCode, params.createdByUserId, params.note],
+    );
+  }
+
+  async saveRoomSettlementEntry(params: {
+    snapshotId: string;
+    roomCode: string;
+    userId: string;
+    nickname: string;
+    roundsPlayed: number;
+    roundsWon: number;
+    bankruptCount: number;
+    totalPoints: number;
+    details: Array<{ roundId: string; settledAt: string; points: number; rank: number; chips: number }>;
+  }): Promise<void> {
+    await this.safeQuery(
+      `INSERT INTO room_settlement_entries (
+         snapshot_id,
+         room_code,
+         user_id,
+         nickname,
+         rounds_played,
+         rounds_won,
+         bankrupt_count,
+         total_points,
+         details_json
+       )
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [
+        params.snapshotId,
+        params.roomCode,
+        params.userId,
+        params.nickname,
+        params.roundsPlayed,
+        params.roundsWon,
+        params.bankruptCount,
+        params.totalPoints,
+        JSON.stringify(params.details),
+      ],
+    );
+  }
+
+  async listRoomRoundDetails(roomCode: string, userId: string): Promise<
+    Array<{ roundId: string; settledAt: string; points: number; rank: number; chips: number }>
+  > {
+    const rows = await this.safeQueryRows<{
+      roundId: string;
+      settledAt: string;
+      points: number;
+      rank: number;
+      chips: number;
+    }>(
+      `SELECT
+         round_id AS "roundId",
+         settled_at AS "settledAt",
+         total_points AS "points",
+         rank AS "rank",
+         chips AS "chips"
+       FROM room_round_results
+       WHERE room_code = $1 AND user_id = $2
+       ORDER BY settled_at ASC`,
+      [roomCode, userId],
+    );
+    return rows.map((row) => ({ ...row, points: Number(row.points), rank: Number(row.rank), chips: Number(row.chips) }));
+  }
+
+  async listRoomSettlementSnapshots(roomCode: string, limit: number): Promise<RoomSettlementSnapshot[]> {
+    const snapshots = await this.safeQueryRows<{
+      snapshotId: string;
+      roomCode: string;
+      createdByUserId: string;
+      createdAt: string;
+      note: string;
+    }>(
+      `SELECT
+         snapshot_id AS "snapshotId",
+         room_code AS "roomCode",
+         created_by_user_id AS "createdByUserId",
+         created_at AS "createdAt",
+         note AS "note"
+       FROM room_settlement_snapshots
+       WHERE room_code = $1
+       ORDER BY created_at DESC
+       LIMIT $2`,
+      [roomCode, limit],
+    );
+
+    const results: RoomSettlementSnapshot[] = [];
+    for (const snapshot of snapshots) {
+      const entries = await this.safeQueryRows<{
+        userId: string;
+        nickname: string;
+        totalPoints: number;
+        roundsPlayed: number;
+        roundsWon: number;
+        bankruptCount: number;
+        details: Array<{ roundId: string; settledAt: string; points: number; rank: number; chips: number }>;
+      }>(
+        `SELECT
+           user_id AS "userId",
+           nickname AS "nickname",
+           total_points AS "totalPoints",
+           rounds_played AS "roundsPlayed",
+           rounds_won AS "roundsWon",
+           bankrupt_count AS "bankruptCount",
+           details_json AS "details"
+         FROM room_settlement_entries
+         WHERE snapshot_id = $1
+         ORDER BY total_points DESC`,
+        [snapshot.snapshotId],
+      );
+      results.push({
+        snapshotId: snapshot.snapshotId,
+        roomCode: snapshot.roomCode,
+        createdByUserId: snapshot.createdByUserId,
+        createdAt: snapshot.createdAt,
+        note: snapshot.note,
+        entries: entries.map((entry) => ({
+          ...entry,
+          totalPoints: Number(entry.totalPoints),
+          roundsPlayed: Number(entry.roundsPlayed),
+          roundsWon: Number(entry.roundsWon),
+          bankruptCount: Number(entry.bankruptCount),
+          details: Array.isArray(entry.details) ? entry.details : [],
+        })),
+      });
+    }
+    return results;
   }
 }
