@@ -461,15 +461,18 @@ export class Persistence {
       `SELECT
          room_code AS "roomCode",
          user_id AS "userId",
-         nickname AS "nickname",
-         rounds_played AS "roundsPlayed",
-         rounds_won AS "roundsWon",
-         bankrupt_count AS "bankruptCount",
-         total_points AS "totalPoints",
-         updated_at AS "updatedAt"
-       FROM room_leaderboard_stats
+         MAX(nickname) AS "nickname",
+         COUNT(*)::int AS "roundsPlayed",
+         SUM(CASE WHEN rank = 1 THEN 1 ELSE 0 END)::int AS "roundsWon",
+         SUM(CASE WHEN chips = 0 THEN 1 ELSE 0 END)::int AS "bankruptCount",
+         COALESCE(SUM(total_points), 0)::numeric AS "totalPoints",
+         MAX(settled_at) AS "updatedAt"
+       FROM room_round_results
        WHERE room_code = $1
-       ORDER BY total_points DESC, rounds_won DESC, rounds_played DESC
+       GROUP BY room_code, user_id
+       ORDER BY COALESCE(SUM(total_points), 0) DESC,
+                SUM(CASE WHEN rank = 1 THEN 1 ELSE 0 END) DESC,
+                COUNT(*) DESC
        LIMIT $2`,
       [roomCode, limit],
     );
