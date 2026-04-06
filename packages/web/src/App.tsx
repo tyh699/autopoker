@@ -653,6 +653,9 @@ export function App() {
     const syncRoom = (nextRoom: RoomView) => {
       setRoom(nextRoom);
       setNotice(nextRoom.message);
+      if (!nextRoom.specialResult || nextRoom.hand) {
+        setSettlement(null);
+      }
       const snapshot = {
         roomCode: nextRoom.roomCode,
         reconnectToken: nextRoom.viewerReconnectToken,

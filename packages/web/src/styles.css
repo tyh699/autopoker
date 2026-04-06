@@ -902,7 +902,7 @@ label {
   display: grid;
   place-items: center;
   background: radial-gradient(circle at center, rgba(0, 0, 0, 0.14), rgba(0, 0, 0, 0.42));
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 .settlement-panel {
